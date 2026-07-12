@@ -1797,13 +1797,19 @@ git commit -m "runtime: Reconciler diff + terminate flow, FileWatcher content-ha
 **Files:**
 - Create: `runtime/src/main/java/dc/listener/status/StatusServer.java`
 - Create: `runtime/src/main/java/dc/listener/Main.java`
+- Test: `runtime/src/test/java/dc/listener/status/StatusServerTest.java`
 
 **Interfaces:**
 - Consumes: Task 5 `Reconciler`（`sessions()`、`specError()`）；Task 3 `SessionStatus`。
-- Produces: `class StatusServer`：`StatusServer(int port, Reconciler rec) throws IOException`、`void start()`；唯一 route `GET /status` 回 spec §6 的 JSON（多一個 `subject` 欄位，watch-status.sh 的表格要用）。
+- Produces: `class StatusServer`：`StatusServer(int port, Reconciler rec) throws IOException`、`void start()`；唯一精確 route `GET /status` 回 spec §6 的 JSON（多一個 `subject` 欄位，watch-status.sh 的表格要用）。package-private `port()` / `stop()` 供 HTTP contract tests 使用。
 - Produces: `Main.main()`：env `NATS_URL`（預設 `nats://localhost:4222`）、`SESSIONS_FILE`（預設 `config/sessions.yaml`）、`PROCESS_DELAY_MS`（預設 `200`）。
 
-無單元測試（純組裝 + 字串拼接）—— smoke test 會 curl 驗證 JSON。
+三個 HTTP contract tests 驗證：有效 JSON/status snapshot、multiline `specError` escaping，
+以及只有精確 `GET /status` 可服務。Task 7 smoke test 會再以真實 runtime/NATS 驗證。
+
+**Code-review amendments:** 最終 reviewed source 對所有 JSON C0 control characters 做 escaping，
+拒絕非 GET 與 `/status/*`，並以 ephemeral port/stop hooks 隔離測試；下方 initial sketch
+由實際 source 與 `StatusServerTest` 取代。
 
 - [ ] **Step 1: 實作兩個檔**
 
@@ -1920,7 +1926,7 @@ public final class Main {
 - [ ] **Step 2: 編譯確認通過**
 
 Run: `docker run --rm -v "$(pwd)/runtime":/work -w /work -v dc-listener-gradle:/home/gradle/.gradle gradle:8.7-jdk21 gradle --no-daemon build`
-Expected: `BUILD SUCCESSFUL`，38 tests PASS。
+Expected: `BUILD SUCCESSFUL`，53 tests PASS。
 
 - [ ] **Step 3: Commit**
 
