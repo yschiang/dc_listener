@@ -114,4 +114,17 @@ class SpecParserTest {
             """);
         assertTrue(p.invalid().get("tool-a").contains("soon"));
     }
+
+    @Test
+    void nonStringSessionNameIsParseError() {
+        assertThrows(SpecParser.SpecParseException.class, () -> SpecParser.parse("""
+            sessions:
+              123:
+                desiredState: RUNNING
+                configVersion: v1
+                config:
+                  subject: tool.a.events
+                  durable: dur-a
+            """));
+    }
 }

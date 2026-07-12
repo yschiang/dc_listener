@@ -36,13 +36,16 @@ public final class SpecParser {
 
         Map<String, SessionSpec> valid = new LinkedHashMap<>();
         Map<String, String> invalid = new LinkedHashMap<>();
-        ((Map<String, Object>) sessionMap).forEach((name, body) -> {
+        for (var entry : sessionMap.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || name.isBlank()) {
+                throw new SpecParseException("session name must be a non-blank string");
+            }
             try {
-                valid.put(name, one(name, body));
+                valid.put(name, one(name, entry.getValue()));
             } catch (RuntimeException e) {
                 invalid.put(name, String.valueOf(e.getMessage()));
             }
-        });
+        }
         return new Parsed(valid, invalid);
     }
 

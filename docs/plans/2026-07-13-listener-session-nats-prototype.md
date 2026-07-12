@@ -19,7 +19,8 @@
 - Stream `TOOL_EVENTS`（subjects `tool.>`）＝上游資產，由 publisher 冪等建立；runtime 只建/更新 durable consumer。
 - Commit 規則（CLAUDE.md）：訊息精簡具體、**不加 Co-Authored-By trailer**、只 commit 本地、**不 push**。
 - reason codes 固定字串：`MESSAGING_ENDPOINT_UNREACHABLE`、`RESOURCE_NOT_FOUND`、`INVALID_SPEC: <detail>`、`RETRY_EXHAUSTED`、`DRAIN_TIMEOUT`。
-- 與 spec 的刻意偏離（僅一處）：檔案變更偵測用 **500ms 內容 hash 輪詢** 取代 WatchService —— macOS Docker Desktop bind mount 的 inotify 事件不可靠，會直接毀掉 demo；行為契約不變（改檔 ≤1s 內 reconcile），Task 5 內含同步修訂 spec §5.2 的步驟。
+- 檔案變更偵測採平台中立的 **500ms 穩定內容輪詢**：連續兩次相同才把該份
+  snapshot 直接交給 Reconciler，穩定後 ≤1s reconcile；不依賴特定 OS 的檔案事件語意。
 
 ## 檔案結構總覽
 
@@ -1471,8 +1472,12 @@ git commit -m "runtime: JnatsLink — durable pull consumer, maxReconnects(0), d
 
 **Interfaces:**
 - Consumes: Task 1 `SpecParser`；Task 3 `ListenerSession`（`start/deliver/snapshot/isTerminated`）、`Event`。
-- Produces: `class Reconciler`：`Reconciler(Path file, Function<String, ListenerSession> factory)`、`void reload()`（讀檔 + apply）、`void apply(String yamlText)`（package-private，測試用）、`Map<String, ListenerSession> sessions()`、`String specError()`。
-- Produces: `class FileWatcher`：`FileWatcher(Path file, Runnable onChange)`、`void start()`。
+- Produces: `class Reconciler`：`Reconciler(Path file, Function<String, ListenerSession> factory)`、`void reload()`（startup 讀檔 + apply）、`void applySnapshot(String yamlText)`（套用 watcher 已驗證的同一份內容）、`void apply(String yamlText)`（package-private，測試用）、`Map<String, ListenerSession> sessions()`、`String specError()`。
+- Produces: `class FileWatcher`：`FileWatcher(Path file, Consumer<String> onChange)`、`void start()`；callback 直接收到已連續兩次驗證相同的內容，失敗時自動以同內容重試。
+
+**Code-review amendments:** desired declaration 與已成功投遞的 diff baseline 分開；快速
+remove/re-add 會在舊 instance 完成退場後自動建立 replacement；parser 將非字串 session key
+正規化為 `SpecParseException`。下方初始 TDD sketch 由實際 source 與 regression tests 取代。
 
 - [ ] **Step 1: 寫 failing test**
 
@@ -1691,25 +1696,27 @@ package dc.listener.reconcile;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
- * 500ms 內容 hash 輪詢。
- * ponytail: 刻意不用 WatchService —— macOS Docker Desktop bind mount 的 inotify 不可靠；
- * 介面不變，production（ConfigMap volume）換回 WatchService 即可。
+ * 平台中立的 500ms 內容輪詢。內容連續兩次相同才通知，避免讀到 truncate/rewrite 中間態。
  */
 public final class FileWatcher {
     private final Path file;
-    private final Runnable onChange;
+    private final Consumer<String> onChange;
 
-    public FileWatcher(Path file, Runnable onChange) {
+    public FileWatcher(Path file, Consumer<String> onChange) {
         this.file = file;
         this.onChange = onChange;
     }
 
     public void start() {
         Thread.ofVirtual().name("file-watcher").start(() -> {
-            int last = hash();
+            String applied = null;
+            boolean hasApplied = false;
+            String candidate = null;
+            boolean hasCandidate = false;
             while (true) {
                 try {
                     Thread.sleep(500);
@@ -1717,20 +1724,40 @@ public final class FileWatcher {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                int h = hash();
-                if (h != last) {
-                    last = h;
-                    onChange.run();
+                String current = content();
+                if (hasApplied && Objects.equals(current, applied)) {
+                    candidate = null;
+                    hasCandidate = false;
+                } else if (hasCandidate && Objects.equals(current, candidate)) {
+                    if (notifySafely(current)) {
+                        applied = current;
+                        hasApplied = true;
+                    }
+                    candidate = null;
+                    hasCandidate = false;
+                } else {
+                    candidate = current;
+                    hasCandidate = true;
                 }
             }
         });
     }
 
-    private int hash() {
+    private String content() {
         try {
-            return Arrays.hashCode(Files.readAllBytes(file));
+            return Files.readString(file);
         } catch (IOException e) {
-            return 0;
+            return null;
+        }
+    }
+
+    private boolean notifySafely(String content) {
+        try {
+            onChange.accept(content);
+            return true;
+        } catch (RuntimeException e) {
+            System.err.println("[file-watcher] reload failed: " + e.getMessage());
+            return false;
         }
     }
 }
@@ -1739,7 +1766,7 @@ public final class FileWatcher {
 - [ ] **Step 4: 跑測試確認 pass**
 
 Run: 同 Step 2 指令。
-Expected: `ReconcilerTest` 6 tests PASS；累計 38 tests PASS。
+Expected: Task 5 regression tests 與既有 suite 全部 PASS（目前累計 50 tests）。
 
 - [ ] **Step 5: 同步修訂 spec §5.2 的偵測機制描述**
 
@@ -1752,9 +1779,8 @@ Expected: `ReconcilerTest` 6 tests PASS；累計 38 tests PASS。
 改成：
 
 ```
-檔案變更（500ms 內容 hash 輪詢；macOS Docker Desktop bind mount 的 inotify
-  事件不可靠，故不用 WatchService——行為契約不變：改檔後 ≤1s 觸發 reconcile，
-  且內容比對天然容忍編輯器「先刪再寫」）
+檔案變更（平台中立的 500ms 內容輪詢；連續兩次相同才把該份 snapshot
+  直接交給 Reconciler，穩定後 ≤1s 觸發 reconcile）
 ```
 
 - [ ] **Step 6: Commit**
@@ -1877,7 +1903,7 @@ public final class Main {
         var reconciler = new Reconciler(sessionsFile,
                 name -> new ListenerSession(name, new JnatsLink(natsUrl), processDelayMs));
         reconciler.reload();
-        new FileWatcher(sessionsFile, reconciler::reload).start();
+        new FileWatcher(sessionsFile, reconciler::applySnapshot).start();
         new StatusServer(8080, reconciler).start();
         System.out.println("listener-runtime up | sessions=" + sessionsFile
                 + " | nats=" + natsUrl + " | status=:8080/status");
