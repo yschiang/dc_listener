@@ -176,6 +176,25 @@ class SessionStateMachineTest {
         assertTrue(m.terminating());
     }
 
+    @Test void terminateDuringDrainingStaysDraining() {
+        var m = activeMachine();
+        m.onEvent(new Event.SpecChanged(spec(DesiredState.RUNNING, "v2", "s2", 10)));  // → DRAINING
+        m.onEvent(new Event.Terminate());
+        assertEquals(DRAINING, m.state());
+        assertTrue(m.terminating());
+        m.onEvent(new Event.DrainComplete());
+        assertEquals(STOPPED, m.state());
+    }
+
+    @Test void drainTimeoutWhileTerminatingStops() {
+        var m = activeMachine();
+        m.onEvent(new Event.Terminate());           // → DRAINING, terminating=true
+        m.onEvent(new Event.DrainTimeout());
+        assertEquals(STOPPED, m.state());
+        assertEquals("DRAIN_TIMEOUT", m.reason());
+        assertTrue(m.terminating());
+    }
+
     @Test void stoppedRestartsOnRunningSpec() {
         var m = new SessionStateMachine("t");
         m.onEvent(new Event.SpecChanged(spec(DesiredState.STOPPED, "v1", "s", 10)));
