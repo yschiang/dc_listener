@@ -1949,6 +1949,10 @@ git commit -m "runtime: StatusServer /status JSON + Main assembly"
 - Consumes: Task 6 的可執行 runtime（`gradle installDist` 產出 `build/install/runtime/bin/runtime`）。
 - Produces: `docker compose up -d --build` 起三個服務；`demo/smoke-test.sh` 端到端自檢（CI 可跑），成功輸出 `SMOKE TEST PASS`、exit 0。
 
+**Code-review amendments:** publisher 使用已 smoke-tested 的 nats CLI 0.4.0 image digest；
+smoke cleanup 是單一冪等 EXIT handler，INT/TERM 分別保留 130/143，避免 signal 後繼續執行
+或重複 cleanup。下方指令與實際 source 已同步。
+
 - [ ] **Step 1: 寫 Dockerfile**
 
 `runtime/Dockerfile`：
@@ -1978,7 +1982,8 @@ services:
       - "4222:4222"
 
   upstream-publisher:                 # 上游擁有：冪等建 stream + 每秒發訊（spec §4.3）
-    image: natsio/nats-box:latest
+    # Smoke-tested nats CLI 0.4.0；digest pin 保持 Task 8 command semantics 可重現。
+    image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
     environment:
       NATS_URL: nats://upstream-nats:4222
       SUBJECTS: ${PUBLISHER_SUBJECTS:-tool.a.events tool.b.events tool.c.events tool.d.events}
@@ -2056,26 +2061,50 @@ Expected: 三個 session 都 `observedState: "ACTIVE"`、`admittedCount` > 0、c
 ```sh
 #!/bin/sh
 # 端到端自檢（spec §9.3）：up → ACTIVE → 計數增加 → STANDBY → 計數停 → down
-set -e
+set -eu
 cd "$(dirname "$0")/.."
+
+command -v docker >/dev/null 2>&1 || { echo "FAIL: docker is required"; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "FAIL: curl is required"; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
+[ -f config/sessions.yaml ] || { echo "FAIL: config/sessions.yaml is missing"; exit 1; }
 
 BACKUP=$(mktemp)
 cp config/sessions.yaml "$BACKUP"
 cleanup() {
-  cp "$BACKUP" config/sessions.yaml
+  status=$?
+  trap - EXIT INT TERM
+  if [ -f "$BACKUP" ]; then
+    cp "$BACKUP" config/sessions.yaml || status=1
+    rm -f "$BACKUP"
+  fi
   docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-state_of()    { curl -s localhost:8080/status | jq -r ".sessions[\"$1\"].observedState"; }
-admitted_of() { curl -s localhost:8080/status | jq -r ".sessions[\"$1\"].admittedCount"; }
-wait_state() { # session state timeout_s
+state_of() {
+  curl -sf http://localhost:8080/status | jq -r ".sessions[\"$1\"].observedState"
+}
+
+admitted_of() {
+  curl -sf http://localhost:8080/status | jq -r ".sessions[\"$1\"].admittedCount"
+}
+
+wait_state() {
+  session=$1
+  expected=$2
+  timeout=$3
   i=0
-  while [ "$i" -lt "$3" ]; do
-    [ "$(state_of "$1" 2>/dev/null)" = "$2" ] && return 0
-    i=$((i + 1)); sleep 1
+  while [ "$i" -lt "$timeout" ]; do
+    [ "$(state_of "$session" 2>/dev/null || true)" = "$expected" ] && return 0
+    i=$((i + 1))
+    sleep 1
   done
-  echo "FAIL: timeout waiting $1 -> $2 (now: $(state_of "$1"))"; exit 1
+  echo "FAIL: timeout waiting $session -> $expected (now: $(state_of "$session" 2>/dev/null || echo unavailable))"
+  exit 1
 }
 
 cat > config/sessions.yaml <<'EOF'
@@ -2091,7 +2120,9 @@ EOF
 docker compose up -d --build
 wait_state tool-a ACTIVE 90
 
-c1=$(admitted_of tool-a); sleep 5; c2=$(admitted_of tool-a)
+c1=$(admitted_of tool-a)
+sleep 5
+c2=$(admitted_of tool-a)
 [ "$c2" -gt "$c1" ] || { echo "FAIL: admittedCount not growing ($c1 -> $c2)"; exit 1; }
 echo "OK: consuming ($c1 -> $c2)"
 
@@ -2107,7 +2138,9 @@ EOF
 
 wait_state tool-a STANDBY 30
 sleep 2
-c3=$(admitted_of tool-a); sleep 4; c4=$(admitted_of tool-a)
+c3=$(admitted_of tool-a)
+sleep 4
+c4=$(admitted_of tool-a)
 [ "$c4" -eq "$c3" ] || { echo "FAIL: still consuming in STANDBY ($c3 -> $c4)"; exit 1; }
 echo "OK: STANDBY stops consumption ($c3 = $c4)"
 

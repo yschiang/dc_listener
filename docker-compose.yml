@@ -1,0 +1,41 @@
+services:
+  upstream-nats:                      # 上游擁有（spec §3）
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+
+  upstream-publisher:                 # 上游擁有：冪等建 stream + 每秒發訊（spec §4.3）
+    # Smoke-tested nats CLI 0.4.0; digest pin keeps Task 8 command semantics reproducible.
+    image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
+    environment:
+      NATS_URL: nats://upstream-nats:4222
+      SUBJECTS: ${PUBLISHER_SUBJECTS:-tool.a.events tool.b.events tool.c.events tool.d.events}
+    command:
+      - sh
+      - -c
+      - |
+        until nats -s "$$NATS_URL" stream info TOOL_EVENTS >/dev/null 2>&1; do
+          nats -s "$$NATS_URL" stream add TOOL_EVENTS --subjects 'tool.>' --defaults >/dev/null 2>&1 || sleep 1
+        done
+        echo "stream TOOL_EVENTS ready; publishing to: $$SUBJECTS"
+        i=0
+        while true; do
+          i=$$((i+1))
+          for s in $$SUBJECTS; do
+            nats -s "$$NATS_URL" pub "$$s" "event-$$i" >/dev/null 2>&1 || true
+          done
+          sleep 1
+        done
+
+  listener-runtime:                   # single-replica ListenerCell prototype
+    build: ./runtime
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config
+    environment:
+      NATS_URL: nats://upstream-nats:4222
+      SESSIONS_FILE: /config/sessions.yaml
+      PROCESS_DELAY_MS: "200"
+    # 刻意不設 depends_on：runtime 先起時短暫 DEGRADED，之後自行收斂 ACTIVE。

@@ -1,0 +1,22 @@
+sessions:
+  tool-a:
+    desiredState: RUNNING
+    configVersion: v1
+    config:
+      subject: tool.a.events
+      durable: listener-tool-a
+  tool-b:
+    desiredState: RUNNING
+    configVersion: v1
+    config:
+      subject: tool.b.events
+      durable: listener-tool-b
+      retry:
+        interval: 5s
+        maxAttempts: 10
+  tool-c:
+    desiredState: RUNNING
+    configVersion: v1
+    config:
+      subject: tool.c.events
+      durable: listener-tool-c
