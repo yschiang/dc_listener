@@ -125,23 +125,22 @@ public final class ListenerSession {
     }
 
     public SessionStatus snapshot() {
-        ObservedState st = machine.state();
-        SessionSpec sp = machine.spec();
+        var v = machine.view();
         return new SessionStatus(
                 name,
-                sp == null ? null : sp.subject(),
-                machine.declaredDesired(),
-                st,
-                machine.declaredConfigVersion(),
-                machine.appliedConfigVersion(),
-                sp != null && !machine.reason().startsWith("INVALID_SPEC"),
+                v.spec() == null ? null : v.spec().subject(),
+                v.declaredDesired(),
+                v.state(),
+                v.declaredConfigVersion(),
+                v.appliedConfigVersion(),
+                v.spec() != null && !v.reason().startsWith("INVALID_SPEC"),
                 link.isConnected(),
-                st == ObservedState.ACTIVE || st == ObservedState.DRAINING,
-                gate.admits(),
-                machine.reason(),
-                machine.lastTransitionTime(),
+                v.state() == ObservedState.ACTIVE || v.state() == ObservedState.DRAINING,
+                v.state() == ObservedState.ACTIVE,
+                v.reason(),
+                v.lastTransitionTime(),
                 pipeline.admitted(),
                 pendingCount,
-                machine.retryAttempt());
+                v.retryAttempt());
     }
 }

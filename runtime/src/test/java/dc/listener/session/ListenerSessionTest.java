@@ -88,4 +88,33 @@ class ListenerSessionTest {
         Await.until(() -> !link.connected, 2000);
         assertFalse(s.snapshot().configurationReady());
     }
+
+    @Test
+    void drainTimeoutDiscardsInFlightAndFails() {
+        var link = new FakeNatsLink();
+        for (int i = 0; i < 10; i++) link.messages.add("m" + i);
+        var s = new ListenerSession("t", link, 150);
+        s.start();
+        s.deliver(new Event.SpecChanged(new SessionSpec("t", DesiredState.RUNNING, "v1",
+                "tool.t.events", "dur-t", null, 10, Duration.ofMillis(300))));
+        Await.until(() -> s.snapshot().admittedCount() >= 1, 3000);
+        s.deliver(new Event.SpecChanged(new SessionSpec("t", DesiredState.STANDBY, "v1",
+                "tool.t.events", "dur-t", null, 10, Duration.ofMillis(300))));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.FAILED, 5000);
+        assertEquals("DRAIN_TIMEOUT", s.snapshot().reason());
+        assertTrue(link.acked.size() < 10, "剩餘 in-flight 不得 ack（將由 redelivery 補）");
+    }
+
+    @Test
+    void exponentialBackoffPathEscalates() {
+        var link = new FakeNatsLink();
+        link.connectFailures = 99;
+        var s = new ListenerSession("t", link, 0);
+        s.start();
+        s.deliver(new Event.SpecChanged(new SessionSpec("t", DesiredState.RUNNING, "v1",
+                "tool.t.events", "dur-t", null, 2, Duration.ofSeconds(5))));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.FAILED, 8000);
+        assertEquals("RETRY_EXHAUSTED", s.snapshot().reason());
+        assertEquals(3, link.connectCalls.get());
+    }
 }

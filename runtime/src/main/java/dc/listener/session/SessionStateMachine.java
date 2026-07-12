@@ -141,4 +141,25 @@ public final class SessionStateMachine {
         var d = pending != null ? pending : spec;
         return d == null ? null : d.desiredState();
     }
+
+    /** 單一鎖內的原子快照，供 snapshot() 使用，避免多次 getter 的撕裂讀取。 */
+    public record MachineView(
+            ObservedState state,
+            SessionSpec spec,
+            dc.listener.spec.DesiredState declaredDesired,
+            String declaredConfigVersion,
+            String appliedConfigVersion,
+            String reason,
+            java.time.Instant lastTransitionTime,
+            int retryAttempt,
+            boolean terminating) {}
+
+    public synchronized MachineView view() {
+        var d = pending != null ? pending : spec;
+        return new MachineView(state, spec,
+                d == null ? null : d.desiredState(),
+                d == null ? null : d.configVersion(),
+                spec == null ? null : spec.configVersion(),
+                reason, lastTransition, failures, terminating);
+    }
 }
