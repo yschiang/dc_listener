@@ -1,1 +1,5 @@
 .claude/settings.local.json
+
+runtime/.gradle/
+runtime/build/
+runtime/bin/
