@@ -19,6 +19,8 @@ Status 一律看 table，不用逐份讀 JSON：
   tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
 
 這份文件中的 <N>/<P>/<R> 只代表執行當下會輸出的實際數字，不是 table 會印出的文字。
+標成「Actual output」的區塊則是 2026-07-14（Asia/Taipei）在本機 Docker stack 真實執行後照錄；
+MSG_CNT/PENDING 等數字只屬於該次 run，下次執行不同是正常的。
 
 欄位語意：
 
@@ -32,7 +34,8 @@ Status 一律看 table，不用逐份讀 JSON：
 - PENDING：JetStream consumer server-side backlog。
 - RETRY：目前連線失敗次數。
 - ERROR_REASON：正常為「-」；整份 YAML 壞時顯示 cell.specError；單一 entry 非法、
-  NATS 斷線或重試耗盡時顯示 listener reason。
+  NATS 斷線或重試耗盡時顯示 listener reason。為維持單列表格，specError 只顯示第一行摘要；
+  完整 parser detail 仍可由原始 /status JSON 的 cell.specError 查看。
 
 目前 /status 尚未輸出 NATS URL 與 durable；表格先呈現已由 runtime 回報的 subject。
 若要把 URL/durable 也列入正式維運契約，應先把它們加入 /status，避免 dashboard 用寫死值冒充 observed state。
@@ -51,6 +54,16 @@ Terminal A：啟動服務，之後一直看 status table。
 
 預期：tool-a、tool-b、tool-c 都是 ACTIVE；CONFIG/CONN/ADMIT 都是 ok；
 MSG_CNT 持續增加；ERROR_REASON 是「-」。
+
+Actual output（demo/run-demo.sh up）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     0        -1       0      -
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     0        -1       0      -
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     0        -1       0      -
+
+這裡的 PENDING=-1 是 runtime 剛 ACTIVE、第一次 consumer-info refresh 尚未完成的合法瞬時值；
+後續 snapshot 會更新成實際 backlog。
 
 Terminal B：準備一份可復原的 config。
 
@@ -82,6 +95,17 @@ Demo 1：hot reload，完全不 deployment
   tool-b  tool.b.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
   tool-c  tool.c.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
 
+Actual output（DEMO_AUTO=1 demo/run-demo.sh 1）：
+
+  OK: a/b/c container IDs and start times unchanged (dynamic change, no rollout)
+  OK: same durable listener-tool-a updated in place (cursor 37 -> 61)
+  OK: tool-b/tool-c stayed ACTIVE and kept advancing
+  NAME    NATS_SUBJECT      CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events.v2  ok      v2/v2     RUNNING  ACTIVE    ok    ok     18       0        0      -
+  tool-b  tool.b.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     17       0        0      -
+  tool-c  tool.c.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     17       0        0      -
+  Scenario 1 done: subject/version change applied in place, zero rollout across all three tools.
+
 一句話：config 是 runtime desired state，不是 deployment trigger。
 
 
@@ -102,18 +126,25 @@ Demo 2A：整份 config 讀不懂，last-good 照跑
 # - subject 與 applied version 沿用 last-good，MSG_CNT 繼續增加。
 # - ERROR_REASON 顯示「spec parse error: ...」，明確回報壞 config，process 不 crash。
 
-預期 status shape；實際 MSG_CNT/PENDING 會是數字，parser 後綴會是 SnakeYAML 的實際訊息：
+預期 status shape；實際 MSG_CNT/PENDING 會是數字：
 
   NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
-  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
-  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: while parsing a flow sequence
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: while parsing a flow sequence
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: while parsing a flow sequence
 
 # table 只印實際數字；用 assertion 證明 last-good 的 MSG_CNT 確實仍在前進：
 
   test "$(curl -sf http://localhost:8081/status | jq -r '.sessions["tool-a"].admittedCount')" -gt "$A0"
   test "$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')" -gt "$B0"
   test "$(curl -sf http://localhost:8083/status | jq -r '.sessions["tool-c"].admittedCount')" -gt "$C0"
+
+Actual output（malformed YAML 套用後；三個 assertion 均 exit 0）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     106      0        0      spec parse error: while parsing a flow sequence
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     105      0        0      spec parse error: while parsing a flow sequence
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     105      0        0      spec parse error: while parsing a flow sequence
 
 # 修好：放回完整 config，FileWatcher 偵測後會自動清掉 specError。
 
@@ -171,6 +202,20 @@ Demo 2B：只有自己的 entry 非法，該 listener fail-closed
 # 預期：tool-b 回到 ACTIVE，CONFIG/CONN/ADMIT 回到 ok，ERROR_REASON 清空，MSG_CNT 再度增加；
 # container id 仍等於 B_CID。
 
+Actual output（非法 entry 套用後）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     39       0        0      -
+  tool-b  tool.b.events  x       v1/v1     RUNNING  FAILED    x     x      39       0        0      INVALID_SPEC: missing subject
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     41       0        0      -
+
+Actual output（修好 entry 後，同一個 process 原地復原）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     47       0        0      -
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     48       0        0      -
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     48       0        0      -
+
 一句話：錯誤隔離在 owner 自己；fail-closed 是停 admission，不是殺 process。
 
 
@@ -205,6 +250,22 @@ Demo 3：NATS 斷線，DEGRADED + 有界重試 + 自動恢復
   tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
   tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
   tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+
+Actual output（NATS 已停止）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  DEGRADED  x     x      53       0        1      MESSAGING_ENDPOINT_UNREACHABLE
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  DEGRADED  x     x      54       0        1      MESSAGING_ENDPOINT_UNREACHABLE
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  DEGRADED  x     x      54       0        2      MESSAGING_ENDPOINT_UNREACHABLE
+  OK: all three tools observed DEGRADED during the outage
+
+Actual output（NATS 啟動並自動恢復）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     57       3        0      -
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     67       0        0      -
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     59       3        0      -
+  Scenario 2 done: dependency loss was handled as state, every container survived and recovered.
 
 一句話：dependency failure 是可觀察、可恢復的 runtime state。
 

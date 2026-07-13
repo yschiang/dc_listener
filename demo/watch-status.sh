@@ -26,6 +26,7 @@ row_of() {  # tool port -> one @tsv row, or nonzero if unreachable / not present
   DEMO_JSON=$(curl -sf "http://localhost:$2/status" 2>/dev/null) || return 1
   printf '%s' "$DEMO_JSON" | jq -e -r --arg t "$1" '
     (.cell.specError // "") as $specError
+    | ($specError | split("\n")[0]) as $specErrorSummary
     | .sessions[$t] as $v
     | if $v == null then error("absent") else
       [ $t, ($v.subject // "-"),
@@ -36,7 +37,7 @@ row_of() {  # tool port -> one @tsv row, or nonzero if unreachable / not present
         (if $v.conditions.admissionAllowed then "ok" else "x" end),
         ($v.admittedCount | tostring), ($v.pendingCount | tostring),
         ($v.retryAttempt | tostring),
-        (if $specError != "" then $specError
+        (if $specErrorSummary != "" then $specErrorSummary
          elif ($v.reason // "") != "" then $v.reason
          else "-" end)
       ] | @tsv end' 2>/dev/null
