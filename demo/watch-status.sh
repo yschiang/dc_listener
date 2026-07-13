@@ -25,20 +25,27 @@ done
 row_of() {  # tool port -> one @tsv row, or nonzero if unreachable / not present
   DEMO_JSON=$(curl -sf "http://localhost:$2/status" 2>/dev/null) || return 1
   printf '%s' "$DEMO_JSON" | jq -e -r --arg t "$1" '
-    .sessions[$t] as $v
+    (.cell.cellId // $t) as $listenerId
+    | (.cell.specError // "") as $specError
+    | .sessions[$t] as $v
     | if $v == null then error("absent") else
-      [ $t, ($v.subject // "-"), ($v.desiredState // "-"), $v.observedState,
+      [ $listenerId, $t, ($v.subject // "-"),
+        (if $v.conditions.configurationReady then "ok" else "x" end),
         "\($v.declaredConfigVersion // "-")/\($v.appliedConfigVersion // "-")",
+        ($v.desiredState // "-"), $v.observedState,
         (if $v.conditions.connectionReady then "ok" else "x" end),
         (if $v.conditions.admissionAllowed then "ok" else "x" end),
         ($v.admittedCount | tostring), ($v.pendingCount | tostring),
-        ($v.retryAttempt | tostring), (if $v.reason == "" then "-" else $v.reason end)
+        ($v.retryAttempt | tostring),
+        (if $specError != "" then $specError
+         elif ($v.reason // "") != "" then $v.reason
+         else "-" end)
       ] | @tsv end' 2>/dev/null
 }
 
 render() {
   {
-    printf 'SESSION\tSUBJECT\tDESIRED\tOBSERVED\tVER(d/a)\tCONN\tADMIT\tADMITTED\tPENDING\tRETRY\tREASON\n'
+    printf 'LISTENER_ID\tNAME\tNATS_SUBJECT\tCONFIG\tVER(d/a)\tDESIRED\tOBSERVED\tCONN\tADMIT\tMSG_CNT\tPENDING\tRETRY\tERROR_REASON\n'
     for DEMO_TP in $CORE_TOOLS; do
       DEMO_T=${DEMO_TP%:*}; DEMO_P=${DEMO_TP#*:}
       row_of "$DEMO_T" "$DEMO_P" || printf '%s\t(unreachable :%s)\n' "$DEMO_T" "$DEMO_P"

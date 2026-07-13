@@ -1,0 +1,210 @@
+dc_listener refactor demo
+=========================
+
+目的
+----
+
+這個 demo 只講三件最精髓的事：
+
+1. 改 config 不需要 deployment：runtime 運行中 hot reload，process/container 不換。
+2. 改 config 不弄壞線上行為：
+   - 整份 config 讀不懂：沿用 last-good 繼續收訊息，並回報 specError。
+   - 只有自己的 entry 非法：該 listener fail-closed，停止收訊息，但 process 活著；
+     宣告修好後，同一個 process 原地復原。
+3. NATS 斷線不倒站：狀態降級為 DEGRADED、有界重試，NATS 回來後自動恢復 ACTIVE（T1）。
+
+Status 一律看 table，不用逐份讀 JSON：
+
+  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     120      0        0      -
+
+欄位語意：
+
+- LISTENER_ID：process/runtime owner id；目前一個 process 只 owner 一個 listener。
+- NAME：listener entry 名稱。
+- NATS_SUBJECT：目前實際套用的 NATS subject（config property）。
+- CONFIG：configurationReady，ok/x。
+- VER(d/a)：declaredConfigVersion/appliedConfigVersion；不同表示尚未收斂或套用失敗。
+- DESIRED / OBSERVED：宣告想要的狀態 / runtime 實際狀態。
+- CONN / ADMIT：NATS connection 是否 ready / 是否允許新訊息進 pipeline。
+- MSG_CNT：本 process 已 admission 的訊息數；應該只增不減。
+- PENDING：JetStream consumer server-side backlog。
+- RETRY：目前連線失敗次數。
+- ERROR_REASON：正常為「-」；整份 YAML 壞時顯示 cell.specError；單一 entry 非法、
+  NATS 斷線或重試耗盡時顯示 listener reason。
+
+目前 /status 尚未輸出 NATS URL 與 durable；表格先呈現已由 runtime 回報的 subject。
+若要把 URL/durable 也列入正式維運契約，應先把它們加入 /status，避免 dashboard 用寫死值冒充 observed state。
+
+
+準備：兩個 terminal
+-------------------
+
+需求：Docker Compose v2、curl、jq；column 為選配。
+
+Terminal A：啟動服務，之後一直看 status table。
+
+  cd /Users/johnson.chiang/workspace/dc_listener
+  demo/run-demo.sh up
+  demo/run-demo.sh status
+
+預期：tool-a、tool-b、tool-c 都是 ACTIVE；CONFIG/CONN/ADMIT 都是 ok；
+MSG_CNT 持續增加；ERROR_REASON 是「-」。
+
+Terminal B：準備一份可復原的 config。
+
+  cd /Users/johnson.chiang/workspace/dc_listener
+  DEMO_BACKUP=$(mktemp)
+  cp config/sessions.yaml "$DEMO_BACKUP"
+  trap 'cp "$DEMO_BACKUP" config/sessions.yaml; rm -f "$DEMO_BACKUP"' EXIT INT TERM
+
+
+Demo 1：hot reload，完全不 deployment
+------------------------------------
+
+# 做什麼：只把 tool-a 的 subject 從 tool.a.events 改成 tool.a.events.v2，version v1 -> v2。
+# 腳本會記錄三個 container id/start time，修改 config，等 runtime 收斂，再驗證 durable
+# 是原地更新、cursor 沒重置，最後自動還原 config。
+
+  demo/run-demo.sh 1
+
+# 預期結果：
+# - tool-a 經 DRAINING/CONNECTING 回到 ACTIVE，VER(d/a) 最終為 v2/v2。
+# - tool-a 在新 subject 收到訊息，MSG_CNT 繼續增加。
+# - tool-a/b/c 的 container id 與 start time 全部不變，沒有 rollout/deployment。
+# - tool-b、tool-c 全程 ACTIVE 且 MSG_CNT 繼續增加。
+
+預期收斂後的 status（數字依執行當下為準）：
+
+  LISTENER_ID  NAME    NATS_SUBJECT      CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a       tool-a  tool.a.events.v2  ok      v2/v2     RUNNING  ACTIVE    ok    ok     135      0        0      -
+  tool-b       tool-b  tool.b.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     132      0        0      -
+  tool-c       tool-c  tool.c.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     132      0        0      -
+
+一句話：config 是 runtime desired state，不是 deployment trigger。
+
+
+Demo 2A：整份 config 讀不懂，last-good 照跑
+-------------------------------------------
+
+# 做什麼：先記住三個 MSG_CNT，再故意寫入 malformed YAML。
+
+  A0=$(curl -sf http://localhost:8081/status | jq -r '.sessions["tool-a"].admittedCount')
+  B0=$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')
+  C0=$(curl -sf http://localhost:8083/status | jq -r '.sessions["tool-c"].admittedCount')
+  printf 'sessions: [broken\n' > config/sessions.yaml
+  sleep 3
+  demo/run-demo.sh once
+
+# 預期結果：
+# - 三個 listener 仍是 ACTIVE，CONN/ADMIT 仍是 ok。
+# - subject 與 applied version 沿用 last-good，MSG_CNT 繼續增加。
+# - ERROR_REASON 顯示「spec parse error: ...」，明確回報壞 config，process 不 crash。
+
+預期 status：
+
+  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >A0      0        0      spec parse error: ...
+  tool-b       tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >B0      0        0      spec parse error: ...
+  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >C0      0        0      spec parse error: ...
+
+# 修好：放回完整 config，FileWatcher 偵測後會自動清掉 specError。
+
+  cp "$DEMO_BACKUP" config/sessions.yaml
+  sleep 3
+  demo/run-demo.sh once
+
+# 預期：三列仍 ACTIVE，ERROR_REASON 全回到「-」，不需重啟任何 container。
+
+一句話：整份看不懂就「不套用」，不是把正在工作的 last-good 一起殺掉。
+
+
+Demo 2B：只有自己的 entry 非法，該 listener fail-closed
+-----------------------------------------------------
+
+# 做什麼：只刪掉 tool-b 的 subject。整份 YAML 仍可 parse，tool-a/tool-c entry 仍有效。
+# 先保存 container id 與 tool-b 訊息數，方便證明 process 活著但停止 admission。
+
+  B_CID=$(docker compose ps -q listener-tool-b)
+  B0=$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')
+  sed '/subject: tool.b.events/d' "$DEMO_BACKUP" > config/sessions.yaml
+  sleep 3
+  demo/run-demo.sh once
+
+# 預期結果：
+# - 只有 tool-b 是 FAILED，CONFIG/CONN/ADMIT 為 x。
+# - tool-b ERROR_REASON 是「INVALID_SPEC: missing subject」。
+# - tool-b 的 :8082 /status 仍回 200，container id 不變，證明 process 活著。
+# - tool-b 的 MSG_CNT 停在 B0；tool-a/tool-c 保持 ACTIVE 且 MSG_CNT 繼續增加。
+
+預期 status：
+
+  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     170      0        0      -
+  tool-b       tool-b  tool.b.events  x       v1/v1     RUNNING  FAILED    x     x      B0       0        0      INVALID_SPEC: missing subject
+  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     170      0        0      -
+
+  curl -sf http://localhost:8082/status >/dev/null && echo 'OK: tool-b process still alive'
+  test "$B_CID" = "$(docker compose ps -q listener-tool-b)" && echo 'OK: same container'
+
+# 修好：放回合法宣告；不 restart，原 process 原地復原。
+
+  cp "$DEMO_BACKUP" config/sessions.yaml
+  sleep 5
+  demo/run-demo.sh once
+
+# 預期：tool-b 回到 ACTIVE，CONFIG/CONN/ADMIT 回到 ok，ERROR_REASON 清空，MSG_CNT 再度增加；
+# container id 仍等於 B_CID。
+
+一句話：錯誤隔離在 owner 自己；fail-closed 是停 admission，不是殺 process。
+
+
+Demo 3：NATS 斷線，DEGRADED + 有界重試 + 自動恢復
+----------------------------------------------------
+
+# 做什麼：短暫停止 upstream-nats。腳本會鎖存每個 listener 曾經出現 DEGRADED，
+# 再於 retry budget 用完前啟動 NATS，驗證三者自動回 ACTIVE 且 container 不變。
+# tool-b 的 retry 設定是 interval=5s、maxAttempts=10；其他 listener 使用 1s -> 30s 指數退避，
+# maxAttempts 預設也是 10，全部都是有界重試。
+
+  demo/run-demo.sh 2
+
+# NATS 停止期間的預期 status：
+
+  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  DEGRADED  x     x      210      0        1      MESSAGING_ENDPOINT_UNREACHABLE
+  tool-b       tool-b  tool.b.events  ok      v1/v1     RUNNING  DEGRADED  x     x      208      0        1      MESSAGING_ENDPOINT_UNREACHABLE
+  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  DEGRADED  x     x      209      0        1      MESSAGING_ENDPOINT_UNREACHABLE
+
+# 預期結果：
+# - outage 被表達成 DEGRADED 狀態，不是 process/container crash。
+# - DEGRADED 時 admission 關閉，避免在 dependency 不可用時假裝成功。
+# - retry 次數可見且受 maxAttempts 限制，不會無界 retry storm。
+# - NATS 回來後三列自動回 ACTIVE，RETRY 歸 0，ERROR_REASON 回「-」，MSG_CNT 繼續增加。
+# - tool-a/b/c container id 都不變。
+
+一句話：dependency failure 是可觀察、可恢復的 runtime state。
+
+
+收尾
+----
+
+# Terminal B：手動還原並解除 trap（正常離開 shell 時 trap 也會做同一件事）。
+
+  cp "$DEMO_BACKUP" config/sessions.yaml
+  rm -f "$DEMO_BACKUP"
+  trap - EXIT INT TERM
+
+# Terminal A：Ctrl-C 停止 status watcher。若要移除 demo stack 與 JetStream demo data：
+
+  demo/run-demo.sh down
+
+
+Demo 成功判準
+-------------
+
+1. config hot reload 後 container identity 不變，declared/applied 收斂，訊息繼續走。
+2. malformed whole-file config：ACTIVE + MSG_CNT 前進 + ERROR_REASON=specError。
+3. invalid selected entry：只有該列 FAILED/ADMIT=x，process 活著；修好原地 ACTIVE。
+4. NATS outage：曾觀察到 DEGRADED/ADMIT=x/有界 RETRY；NATS 回來自動 ACTIVE。
+5. 任何錯誤都能從同一張 status table 的 ERROR_REASON 看出具體原因。
