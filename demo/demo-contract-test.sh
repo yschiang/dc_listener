@@ -13,20 +13,47 @@ demo/04-replay.sh
 demo/05-onboarding.sh
 "
 
-# ponytail: the demo scripts above are uncommitted Task-6 artifacts; when absent, SKIP
-# this block (not fail) so the committed Task-5 compose gate is standalone-reproducible.
-# Task 6 makes this block mandatory when it commits those files.
-if [ -e demo/run-demo.sh ]; then
-  for script in $scripts; do
-    [ -x "$script" ] || { echo "FAIL: missing executable $script"; exit 1; }
-    sh -n "$script"
-  done
-  [ -f demo/demo-lib.sh ] || { echo "FAIL: missing demo/demo-lib.sh"; exit 1; }
-  sh -n demo/demo-lib.sh
-  [ -s demo/README.md ] || { echo "FAIL: missing demo/README.md"; exit 1; }
-  demo/run-demo.sh help >/dev/null
-else
-  echo "SKIP: demo artifacts not present (Task 6 scope)"
+# Task 6 committed these demo artifacts, so the block is mandatory (no SKIP fallback).
+for script in $scripts; do
+  [ -x "$script" ] || { echo "FAIL: missing executable $script"; exit 1; }
+  sh -n "$script"
+done
+[ -f demo/demo-lib.sh ] || { echo "FAIL: missing demo/demo-lib.sh"; exit 1; }
+sh -n demo/demo-lib.sh
+[ -s demo/README.md ] || { echo "FAIL: missing demo/README.md"; exit 1; }
+demo/run-demo.sh help >/dev/null
+
+# --- Demo script contract (Task 6): per-tool endpoints, aggregate status, service logs, S5 wording ---
+runtime_scripts="demo/run-demo.sh demo/watch-status.sh demo/demo-lib.sh
+demo/01-change-flow.sh demo/02-degraded.sh demo/03-isolation.sh demo/04-replay.sh demo/05-onboarding.sh"
+for s in $runtime_scripts; do
+  grep -q 'listener-runtime' "$s" && { echo "FAIL: $s references removed listener-runtime service"; exit 1; }
+done
+
+# Endpoint map tool-a->8081, tool-b->8082, tool-c->8083 (watch-status aggregates; demo-lib routes per tool).
+check_port() { grep -q "$2" "$1" || { echo "FAIL: $1 missing endpoint port $2"; exit 1; }; }
+check_port demo/watch-status.sh 8081
+check_port demo/watch-status.sh 8082
+check_port demo/watch-status.sh 8083
+check_port demo/demo-lib.sh 8081
+check_port demo/demo-lib.sh 8082
+check_port demo/demo-lib.sh 8083
+
+# Aggregate status output: single-snapshot mode plus a 2-second default poll.
+grep -q -- '-1' demo/watch-status.sh || { echo "FAIL: watch-status.sh must support single-snapshot mode (-1)"; exit 1; }
+
+# Service-specific logs: run-demo.sh exposes a logs command targeting per-tool services.
+grep -q 'logs)' demo/run-demo.sh || { echo "FAIL: run-demo.sh missing a logs command"; exit 1; }
+grep -q 'listener-tool-a' demo/run-demo.sh || { echo "FAIL: run-demo.sh must target per-tool services (listener-tool-a)"; exit 1; }
+
+# Revised scenario-5 wording: workload operation via the onboarding profile + controller, no durable deletion.
+grep -q -- '--profile onboarding' demo/05-onboarding.sh \
+  || { echo "FAIL: scenario 5 must onboard via the onboarding compose profile"; exit 1; }
+grep -qi 'controller' demo/05-onboarding.sh \
+  || { echo "FAIL: scenario 5 must state production onboards through the controller"; exit 1; }
+# must not actually delete a consumer (prose may say it does NOT; forbid the real commands only).
+if grep -qE 'consumer rm|consumer delete|deleteConsumer|--profile onboarding down' demo/05-onboarding.sh; then
+  echo "FAIL: scenario 5 must not delete the durable consumer / tear down offboarding"; exit 1
 fi
 
 docker compose config --quiet
