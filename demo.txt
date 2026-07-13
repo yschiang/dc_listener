@@ -15,13 +15,14 @@ dc_listener refactor demo
 
 Status 一律看 table，不用逐份讀 JSON：
 
-  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     120      0        0      -
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+
+這份文件中的 <N>/<P>/<R> 只代表執行當下會輸出的實際數字，不是 table 會印出的文字。
 
 欄位語意：
 
-- LISTENER_ID：process/runtime owner id；目前一個 process 只 owner 一個 listener。
-- NAME：listener entry 名稱。
+- NAME：listener entry 名稱，也是目前一個 process 一個 listener 的 owner identity。
 - NATS_SUBJECT：目前實際套用的 NATS subject（config property）。
 - CONFIG：configurationReady，ok/x。
 - VER(d/a)：declaredConfigVersion/appliedConfigVersion；不同表示尚未收斂或套用失敗。
@@ -74,12 +75,12 @@ Demo 1：hot reload，完全不 deployment
 # - tool-a/b/c 的 container id 與 start time 全部不變，沒有 rollout/deployment。
 # - tool-b、tool-c 全程 ACTIVE 且 MSG_CNT 繼續增加。
 
-預期收斂後的 status（數字依執行當下為準）：
+腳本在還原 config 前會輸出這個 status shape；<N>/<P> 代表當下實際數字，不是 output 文字：
 
-  LISTENER_ID  NAME    NATS_SUBJECT      CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a       tool-a  tool.a.events.v2  ok      v2/v2     RUNNING  ACTIVE    ok    ok     135      0        0      -
-  tool-b       tool-b  tool.b.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     132      0        0      -
-  tool-c       tool-c  tool.c.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     132      0        0      -
+  NAME    NATS_SUBJECT      CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events.v2  ok      v2/v2     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+  tool-b  tool.b.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+  tool-c  tool.c.events     ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
 
 一句話：config 是 runtime desired state，不是 deployment trigger。
 
@@ -101,12 +102,18 @@ Demo 2A：整份 config 讀不懂，last-good 照跑
 # - subject 與 applied version 沿用 last-good，MSG_CNT 繼續增加。
 # - ERROR_REASON 顯示「spec parse error: ...」，明確回報壞 config，process 不 crash。
 
-預期 status：
+預期 status shape；實際 MSG_CNT/PENDING 會是數字，parser 後綴會是 SnakeYAML 的實際訊息：
 
-  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >A0      0        0      spec parse error: ...
-  tool-b       tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >B0      0        0      spec parse error: ...
-  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     >C0      0        0      spec parse error: ...
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      spec parse error: <parser message>
+
+# table 只印實際數字；用 assertion 證明 last-good 的 MSG_CNT 確實仍在前進：
+
+  test "$(curl -sf http://localhost:8081/status | jq -r '.sessions["tool-a"].admittedCount')" -gt "$A0"
+  test "$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')" -gt "$B0"
+  test "$(curl -sf http://localhost:8083/status | jq -r '.sessions["tool-c"].admittedCount')" -gt "$C0"
 
 # 修好：放回完整 config，FileWatcher 偵測後會自動清掉 specError。
 
@@ -123,7 +130,8 @@ Demo 2B：只有自己的 entry 非法，該 listener fail-closed
 -----------------------------------------------------
 
 # 做什麼：只刪掉 tool-b 的 subject。整份 YAML 仍可 parse，tool-a/tool-c entry 仍有效。
-# 先保存 container id 與 tool-b 訊息數，方便證明 process 活著但停止 admission。
+# 先保存 container id。B0 只是修改前的參考值；FileWatcher 套用前仍可能多收幾則，
+# 所以不能宣稱 FAILED 時的 MSG_CNT 必定恰好等於 B0。
 
   B_CID=$(docker compose ps -q listener-tool-b)
   B0=$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')
@@ -135,17 +143,24 @@ Demo 2B：只有自己的 entry 非法，該 listener fail-closed
 # - 只有 tool-b 是 FAILED，CONFIG/CONN/ADMIT 為 x。
 # - tool-b ERROR_REASON 是「INVALID_SPEC: missing subject」。
 # - tool-b 的 :8082 /status 仍回 200，container id 不變，證明 process 活著。
-# - tool-b 的 MSG_CNT 停在 B0；tool-a/tool-c 保持 ACTIVE 且 MSG_CNT 繼續增加。
+# - tool-b 進入 FAILED 後 MSG_CNT 不再增加；tool-a/tool-c 保持 ACTIVE 且 MSG_CNT 繼續增加。
 
-預期 status：
+預期 status shape：
 
-  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     170      0        0      -
-  tool-b       tool-b  tool.b.events  x       v1/v1     RUNNING  FAILED    x     x      B0       0        0      INVALID_SPEC: missing subject
-  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     170      0        0      -
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT    PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>        <P>      0      -
+  tool-b  tool.b.events  x       v1/v1     RUNNING  FAILED    x     x      <N>        <P>      0      INVALID_SPEC: missing subject
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>        <P>      0      -
 
   curl -sf http://localhost:8082/status >/dev/null && echo 'OK: tool-b process still alive'
   test "$B_CID" = "$(docker compose ps -q listener-tool-b)" && echo 'OK: same container'
+
+# 再等 3 秒，驗證 tool-b 在 FAILED 後真的沒有繼續 admission：
+
+  B_FAILED=$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')
+  test "$B_FAILED" -ge "$B0"
+  sleep 3
+  test "$(curl -sf http://localhost:8082/status | jq -r '.sessions["tool-b"].admittedCount')" -eq "$B_FAILED"
 
 # 修好：放回合法宣告；不 restart，原 process 原地復原。
 
@@ -169,12 +184,11 @@ Demo 3：NATS 斷線，DEGRADED + 有界重試 + 自動恢復
 
   demo/run-demo.sh 2
 
-# NATS 停止期間的預期 status：
+# NATS 停止期間不是穩態：每列會在 DEGRADED 與 CONNECTING 間重試，三列不保證同一個 poll
+# 同時顯示 DEGRADED。以下是 watcher 可能捕捉到的一列，不是三列固定 snapshot：
 
-  LISTENER_ID  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
-  tool-a       tool-a  tool.a.events  ok      v1/v1     RUNNING  DEGRADED  x     x      210      0        1      MESSAGING_ENDPOINT_UNREACHABLE
-  tool-b       tool-b  tool.b.events  ok      v1/v1     RUNNING  DEGRADED  x     x      208      0        1      MESSAGING_ENDPOINT_UNREACHABLE
-  tool-c       tool-c  tool.c.events  ok      v1/v1     RUNNING  DEGRADED  x     x      209      0        1      MESSAGING_ENDPOINT_UNREACHABLE
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  DEGRADED  x     x      <N>      <P>      <R>    MESSAGING_ENDPOINT_UNREACHABLE
 
 # 預期結果：
 # - outage 被表達成 DEGRADED 狀態，不是 process/container crash。
@@ -182,6 +196,15 @@ Demo 3：NATS 斷線，DEGRADED + 有界重試 + 自動恢復
 # - retry 次數可見且受 maxAttempts 限制，不會無界 retry storm。
 # - NATS 回來後三列自動回 ACTIVE，RETRY 歸 0，ERROR_REASON 回「-」，MSG_CNT 繼續增加。
 # - tool-a/b/c container id 都不變。
+# - 腳本用 latch 保證每個 listener 都「曾經」進入 DEGRADED；這個保證看腳本的 OK 訊息，
+#   不用要求一個 2 秒 polling snapshot 剛好同時拍到三列 DEGRADED。
+
+腳本結束時的實際 output shape（穩定、三列都應符合）：
+
+  NAME    NATS_SUBJECT   CONFIG  VER(d/a)  DESIRED  OBSERVED  CONN  ADMIT  MSG_CNT  PENDING  RETRY  ERROR_REASON
+  tool-a  tool.a.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+  tool-b  tool.b.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
+  tool-c  tool.c.events  ok      v1/v1     RUNNING  ACTIVE    ok    ok     <N>      <P>      0      -
 
 一句話：dependency failure 是可觀察、可恢復的 runtime state。
 

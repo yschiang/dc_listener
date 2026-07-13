@@ -25,11 +25,10 @@ done
 row_of() {  # tool port -> one @tsv row, or nonzero if unreachable / not present
   DEMO_JSON=$(curl -sf "http://localhost:$2/status" 2>/dev/null) || return 1
   printf '%s' "$DEMO_JSON" | jq -e -r --arg t "$1" '
-    (.cell.cellId // $t) as $listenerId
-    | (.cell.specError // "") as $specError
+    (.cell.specError // "") as $specError
     | .sessions[$t] as $v
     | if $v == null then error("absent") else
-      [ $listenerId, $t, ($v.subject // "-"),
+      [ $t, ($v.subject // "-"),
         (if $v.conditions.configurationReady then "ok" else "x" end),
         "\($v.declaredConfigVersion // "-")/\($v.appliedConfigVersion // "-")",
         ($v.desiredState // "-"), $v.observedState,
@@ -45,7 +44,7 @@ row_of() {  # tool port -> one @tsv row, or nonzero if unreachable / not present
 
 render() {
   {
-    printf 'LISTENER_ID\tNAME\tNATS_SUBJECT\tCONFIG\tVER(d/a)\tDESIRED\tOBSERVED\tCONN\tADMIT\tMSG_CNT\tPENDING\tRETRY\tERROR_REASON\n'
+    printf 'NAME\tNATS_SUBJECT\tCONFIG\tVER(d/a)\tDESIRED\tOBSERVED\tCONN\tADMIT\tMSG_CNT\tPENDING\tRETRY\tERROR_REASON\n'
     for DEMO_TP in $CORE_TOOLS; do
       DEMO_T=${DEMO_TP%:*}; DEMO_P=${DEMO_TP#*:}
       row_of "$DEMO_T" "$DEMO_P" || printf '%s\t(unreachable :%s)\n' "$DEMO_T" "$DEMO_P"
