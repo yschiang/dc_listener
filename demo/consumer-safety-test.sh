@@ -9,15 +9,15 @@
 #   4. never deletes a consumer when a declaration disappears.
 #
 # STATUS_URL / RUNTIME_SERVICE are overridable so the same evidence runs before and after the
-# Task 5 Compose cutover (single listener-runtime:8080  ->  listener-tool-a:8081).
+# Task 5 Compose cutover (single listener-runtime:8080 -> now listener-tool-a:8081 by default).
 #
 # Assumes the stack is already up:  docker compose up -d --build
 # On exit it restores the original config and waits for ACTIVE again. It NEVER deletes a consumer.
 set -eu
 cd "$(dirname "$0")/.."
 
-STATUS_URL="${STATUS_URL:-http://localhost:8080}"
-RUNTIME_SERVICE="${RUNTIME_SERVICE:-listener-runtime}"
+STATUS_URL="${STATUS_URL:-http://localhost:8081}"
+RUNTIME_SERVICE="${RUNTIME_SERVICE:-listener-tool-a}"
 TOOL="${TOOL:-tool-a}"
 DURABLE="${DURABLE:-listener-tool-a}"
 STREAM="${STREAM:-TOOL_EVENTS}"

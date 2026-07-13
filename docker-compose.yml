@@ -1,3 +1,13 @@
+x-runtime: &runtime-base            # single-session ListenerSession prototype (one image, one tool)
+  build: ./runtime
+  volumes:
+    - ./config:/config
+  environment: &runtime-env
+    NATS_URL: nats://upstream-nats:4222
+    SESSIONS_FILE: /config/sessions.yaml
+    PROCESS_DELAY_MS: "200"
+    # 刻意不設 depends_on：runtime 先起時短暫 DEGRADED，之後自行收斂 ACTIVE。
+
 services:
   upstream-nats:                      # 上游擁有（spec §3）
     image: nats:2.10-alpine
@@ -28,14 +38,35 @@ services:
           sleep 1
         done
 
-  listener-runtime:                   # single-replica ListenerCell prototype
-    build: ./runtime
+  listener-tool-a:                    # one process, one tool (ADR-0001 single-session runtime)
+    <<: *runtime-base
     ports:
-      - "8080:8080"
-    volumes:
-      - ./config:/config
+      - "8081:8080"
     environment:
-      NATS_URL: nats://upstream-nats:4222
-      SESSIONS_FILE: /config/sessions.yaml
-      PROCESS_DELAY_MS: "200"
-    # 刻意不設 depends_on：runtime 先起時短暫 DEGRADED，之後自行收斂 ACTIVE。
+      <<: *runtime-env
+      SESSION_NAME: tool-a
+
+  listener-tool-b:
+    <<: *runtime-base
+    ports:
+      - "8082:8080"
+    environment:
+      <<: *runtime-env
+      SESSION_NAME: tool-b
+
+  listener-tool-c:
+    <<: *runtime-base
+    ports:
+      - "8083:8080"
+    environment:
+      <<: *runtime-env
+      SESSION_NAME: tool-c
+
+  listener-tool-d:                    # onboarding-profile only: demonstrates a new workload, not a default
+    <<: *runtime-base
+    profiles: ["onboarding"]
+    ports:
+      - "8084:8080"
+    environment:
+      <<: *runtime-env
+      SESSION_NAME: tool-d
