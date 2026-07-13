@@ -26,7 +26,7 @@ public final class Main {
         var coordinator = new ShutdownCoordinator(session, status::stop, cfg.shutdownTimeout());
         Runtime.getRuntime().addShutdownHook(new Thread(coordinator::shutdown, "shutdown"));
 
-        System.out.println("listener-runtime up | session=" + cfg.sessionName()
+        System.out.println("listener-tool runtime up | session=" + cfg.sessionName()
                 + " | sessions=" + cfg.sessionsFile() + " | nats=" + cfg.natsUrl()
                 + " | status=:" + cfg.statusPort() + "/status");
         Thread.currentThread().join();

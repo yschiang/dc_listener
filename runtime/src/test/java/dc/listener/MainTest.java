@@ -74,6 +74,15 @@ class MainTest {
                 () -> StartupConfig.fromEnv(env("SESSION_NAME", "tool-a", "STATUS_PORT", "notaport")));
     }
 
+    @Test
+    void rejectsOutOfRangeStatusPort() {
+        var ex = assertThrows(IllegalArgumentException.class,
+                () -> StartupConfig.fromEnv(env("SESSION_NAME", "tool-a", "STATUS_PORT", "70000")));
+        assertTrue(ex.getMessage().contains("STATUS_PORT"), ex.getMessage());
+        assertThrows(IllegalArgumentException.class,
+                () -> StartupConfig.fromEnv(env("SESSION_NAME", "tool-a", "STATUS_PORT", "-1")));
+    }
+
     // ---------- ShutdownCoordinator: graceful, bounded, idempotent ----------
 
     private static ListenerSession activeSession(FakeNatsLink link) {

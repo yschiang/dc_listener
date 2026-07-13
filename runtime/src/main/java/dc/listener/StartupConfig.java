@@ -22,12 +22,16 @@ record StartupConfig(
         if (sessionName == null || sessionName.isBlank()) {
             throw new IllegalArgumentException("SESSION_NAME is required and must be non-blank");
         }
+        long statusPort = parseLong(env, "STATUS_PORT", 8080);
+        if (statusPort < 0 || statusPort > 65535) {
+            throw new IllegalArgumentException("STATUS_PORT must be 0..65535, got: " + statusPort);
+        }
         return new StartupConfig(
                 sessionName,
                 orDefault(env, "NATS_URL", "nats://localhost:4222"),
                 Path.of(orDefault(env, "SESSIONS_FILE", "config/sessions.yaml")),
                 parseLong(env, "PROCESS_DELAY_MS", 200),
-                (int) parseLong(env, "STATUS_PORT", 8080),
+                (int) statusPort,
                 Duration.ofMillis(parseLong(env, "SHUTDOWN_TIMEOUT_MS", 30_000)));
     }
 

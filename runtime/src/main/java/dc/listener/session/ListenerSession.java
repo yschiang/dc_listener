@@ -11,7 +11,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 一個 session = 專屬 NatsLink + 專屬 virtual thread + mailbox；跨 session 零共享可變狀態（P3）。 */
+/** 一個 process 一個 session（ADR-0001）：專屬 NatsLink + mailbox；virtual thread 只是 blocking I/O 的實作便利，不是隔離邊界。 */
 public final class ListenerSession {
     private static final int FETCH_BATCH = 10;
 

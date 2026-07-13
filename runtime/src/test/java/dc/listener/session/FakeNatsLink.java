@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** 測試替身：可注入 connect 失敗次數、可餵訊息、記錄 ack。
  *  每次成功 connect 遞增 generation：fetch 出的 handle 帶當時 generation，ack 一個 generation 不符的 handle
  *  代表在對「上一條連線」的 handle 做 ack（真實 NATS 會拒絕）→ 記到 staleAcks，證明重連後不得 ack 舊 handle。
- *  欄位 public：ReconcilerTest（dc.listener.reconcile package）也要直接讀。 */
+ *  欄位 public：SingleSessionReconcilerTest（dc.listener.reconcile package）也要直接讀。 */
 public final class FakeNatsLink implements NatsLink {
     public final ConcurrentLinkedDeque<String> messages = new ConcurrentLinkedDeque<>();
     public final List<String> acked = new CopyOnWriteArrayList<>();
