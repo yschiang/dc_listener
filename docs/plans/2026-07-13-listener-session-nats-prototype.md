@@ -2,6 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ SUPERSEDED IN PART by [ADR-0001](../adr/0001-single-session-pod-runtime.md) and the
+> [single-session pod refactor plan](2026-07-13-single-session-pod-refactor.md) (2026-07-13).**
+> Tasks 1–8 below are the **historical build record** of the prototype that this plan produced,
+> and all eight were completed and independently reviewed (see `.superpowers/sdd/task-1..7-report.md`).
+> That prototype's multi-session-per-process model (one `listener-runtime` process hosting several
+> `ListenerSession` instances), its per-session-virtual-thread isolation claim, its config-only
+> in-process onboarding/offboarding (adding/removing a YAML entry directly creates/deletes a
+> session), and its `deleteConsumer`/delete-and-recreate consumer paths are exactly what ADR-0001
+> decided **against** as the initial production model. The refactor plan's Tasks 1–6 (commits
+> `7f8503b`, `01d1619`, `acbbc63`, `3ce7908`, `7fd2966`+`7d57daf`, `5b3b9f8`) already replaced those
+> paths in `runtime/`, `docker-compose.yml`, and `demo/`: one process now owns exactly one session,
+> Kubernetes/Compose-service boundaries (not virtual threads) provide isolation, no config change can
+> ever trigger a consumer delete, and `runtime/src/main` contains no consumer-delete API or NATS
+> consumer-delete call. This document is preserved as history — it is not the current production
+> direction. Section-level notes below flag the load-bearing conflicts; unmarked sections (state
+> machine transition tables, error classification, admission/at-least-once semantics, YAML schema)
+> remain accurate as domain-model documentation for the single-session runtime.
+
 **Goal:** 依 `docs/specs/2026-07-13-listener-session-nats-prototype-design.md` 建出可跑的 docker prototype：一個 Java 21 ListenerCell runtime 管多個 ListenerSession，desired 宣告走 `config/sessions.yaml`，observed 走 `GET :8080/status`，配五個 demo 場景。
 
 **Architecture:** 每個 session 一條獨立 NATS Connection + 一個 virtual thread + mailbox（`BlockingQueue<Event>`）；`SessionStateMachine` 是唯一權威 lifecycle（純轉移邏輯、無 I/O，7 個 observedState）；`Reconciler` 輪詢 YAML → diff → 投遞事件；jnats auto-reconnect 關閉（`maxReconnects(0)`），重連全由狀態機主導。
@@ -809,6 +827,15 @@ git commit -m "runtime: SessionStateMachine — 7-state lifecycle, error classif
 
 ### Task 3: ListenerSession loop + NatsLink 介面 + AdmissionGate + PipelineStub
 
+> **Superseded by ADR-0001 + refactor Task 2（commit `01d1619`）：** the `NatsLink`/`JnatsLink`
+> interface built below includes `void deleteConsumer(SessionSpec)`, and `ListenerSession` calls it
+> on `Terminate`. Refactor Task 2 removed `deleteConsumer` from `NatsLink`, `JnatsLink`, and the test
+> fake entirely, replaced the destructive `Event.Terminate` with a non-destructive `Event.Shutdown`
+> that retains the durable, and added a source-level check that `runtime/src/main` contains no
+> consumer-delete API or NATS consumer-delete call. The per-session-virtual-thread/mailbox isolation
+> language in this task ("每個 session 一條獨立 NATS Connection + 一個 virtual thread...P3") is also
+> prototype-stage history — see the top-of-document banner and ADR-0001 §1/§5.
+
 **Files:**
 - Create: `runtime/src/main/java/dc/listener/session/InFlightMsg.java`
 - Create: `runtime/src/main/java/dc/listener/session/LinkException.java`
@@ -1310,6 +1337,15 @@ git commit -m "runtime: ListenerSession actor loop, NatsLink interface, admissio
 ---
 
 ### Task 4: JnatsLink（真實 NATS 實作）
+
+> **Superseded by ADR-0001 + refactor Task 2（commit `01d1619`）：** the implementation built in
+> this task includes a `JetStreamApiException` → delete-and-recreate fallback in `connect()`
+> (`jsm.deleteConsumer(STREAM, spec.durable())` followed by a fresh create) and a `deleteConsumer`
+> method that issues a real NATS consumer-delete call. Both were removed by refactor Task 2: a
+> selected-durable change now fails closed as `FAILED/INVALID_SPEC` without touching the server-side
+> consumer, and any `JetStreamApiException` from in-place filter update maps to `RESOURCE_NOT_FOUND`
+> with bounded `DEGRADED` retry — never delete/recreate. `demo/consumer-safety-test.sh` (refactor
+> Task 2) is the real-NATS acceptance evidence for the current in-place-update behavior.
 
 **Files:**
 - Create: `runtime/src/main/java/dc/listener/session/JnatsLink.java`
@@ -1939,6 +1975,14 @@ git commit -m "runtime: StatusServer /status JSON + Main assembly"
 
 ### Task 7: Docker 化 + compose + smoke test
 
+> **Superseded by ADR-0001 + refactor Task 5（commits `7fd2966`+`7d57daf`）：** the single
+> `listener-runtime` Compose service built here (`# 我們的 ListenerCell`, hosting tool-a/b/c inside
+> one process) is prototype-stage history. `docker-compose.yml` now defines four services —
+> `listener-tool-a`/`b`/`c` on host ports 8081/8082/8083 (default) plus `listener-tool-d` on 8084
+> under the `onboarding` profile — sharing one build/image/config-mount template but each pinning a
+> distinct `SESSION_NAME` and owning exactly one `ListenerSession`. There is no `listener-runtime`
+> service in the current file.
+
 **Files:**
 - Create: `runtime/Dockerfile`
 - Create: `docker-compose.yml`
@@ -2165,7 +2209,18 @@ git commit -m "compose: upstream-nats/publisher + listener-runtime, initial sess
 
 ### Task 8: watch-status.sh + 五支 demo 腳本
 
+> **Superseded by ADR-0001 + refactor Task 6（commit `5b3b9f8`）：** the sketches below (including
+> the in-flight "步驟 3" runbook edit and `demo/05-onboarding.sh`) target the prototype's single
+> `listener-runtime` process with 3+1 in-process sessions. The demo suite was rewritten for process
+> isolation across four Compose services; `demo/README.md`, `demo/run-demo.sh`, and `demo/0{1..5}-*.sh`
+> in the working tree are the authoritative, independently-reviewed versions — not the code below.
+> Two specific conflicts are flagged inline where they occur.
+
 **Files:**
+- Create: `demo/README.md`
+- Create: `demo/run-demo.sh`
+- Create: `demo/demo-lib.sh`
+- Create: `demo/demo-contract-test.sh`
 - Create: `demo/watch-status.sh`
 - Create: `demo/01-change-flow.sh`
 - Create: `demo/02-degraded.sh`
@@ -2175,11 +2230,15 @@ git commit -m "compose: upstream-nats/publisher + listener-runtime, initial sess
 
 **Interfaces:**
 - Consumes: Task 6 的 `/status` JSON（含 `subject` 欄位）；Task 7 的 compose 服務名（`upstream-nats`、`upstream-publisher`）與 `PUBLISHER_SUBJECTS` 環境變數。
-- Produces: 六支可執行 shell script。腳本原則（spec §8）：**只做上游側與觀察側動作；改 YAML 一律由演示者手動做**，腳本印出要改什麼並等 Enter。
+- Produces: 單人操作 runbook、單一 launcher、status table、五支互動場景與 contract validator。腳本原則（spec §8）：**只做上游側與觀察側動作；改 YAML 一律由演示者手動做**，腳本印出要改什麼、等 Enter，再主動驗證 observed state。
+
+**Final operator contract:** `demo/README.md` 是從零開始的單人 runbook；`demo/run-demo.sh`
+提供 up/status/once/1..5/smoke/down/menu 單一入口；場景共用 `demo-lib.sh` 的等待與驗證。
+下方為 initial sketches，最終 reviewed source 與 README 為準。
 
 - [ ] **Step 1: 寫 watch-status.sh**
 
-`demo/watch-status.sh`（macOS 沒有 `watch`，內建 1s 自我輪詢；Ctrl-C 離開）：
+`demo/watch-status.sh`（平台中立的內建 1s 自我輪詢；Ctrl-C 離開）：
 
 ```sh
 #!/bin/sh
@@ -2236,13 +2295,21 @@ PUBLISHER_SUBJECTS="tool.a.events.v2 tool.b.events tool.c.events tool.d.events" 
   docker compose up -d upstream-publisher
 echo "publisher 已改發 tool.a.events.v2"
 
-pause "步驟 3（手動改 YAML）：tool-a 的 subject 改 tool.a.events.v2、configVersion 改 v2、desiredState 改回 RUNNING。
-    觀察：CONNECTING → ACTIVE，VER 變 v2/v2，ADMITTED 繼續增加。
-    不漏訊論證（spec §4.3）：舊 subject 殘餘訊息先補完（durable 游標），新 subject 從頭收"
+pause "步驟 3（手動改 YAML）：先保持舊 subject 並改回 RUNNING，把舊 pending 清到 0；
+    再次 STANDBY 後才把 subject 改 tool.a.events.v2、configVersion 改 v2、desiredState 改回 RUNNING。
+    觀察：舊 backlog 先清空，新 subject backlog 再補齊，避免 filter recreate 遺留舊訊息。"
 
 echo ""
 echo "場景 1 完成：runtime 容器全程未重啟（docker compose ps 可驗證 listener-runtime 的 Up 時間）。"
 ```
+
+> **Superseded by refactor Task 2（commit `01d1619`）：** 「步驟 3」的手動 workaround（先把舊
+> subject 清到 0 pending 才切新 subject）是為了避開 delete/recreate fallback 可能遺留舊訊息而設計
+> 的操作紀律。該 fallback 已被 Task 2 完全移除——目前的 subject/filter 換版是同一 durable 的
+> in-place 更新，沒有 delete/recreate 路徑，因此也不需要這個手動清空步驟。也見上方 drain 語意澄清：
+> DRAINING 本身只 drain 記憶體內已 fetch 的那一批，不代表「先把舊 subject 的 server backlog 處理
+> 完再切」。目前權威版本 `demo/01-change-flow.sh` 直接改 subject/configVersion 並等待收斂，不含
+> 這段 workaround。
 
 `demo/02-degraded.sh`（場景 2：DEGRADED 不 crash，P2 / spec §8#2）：
 
@@ -2340,6 +2407,19 @@ echo ""
 echo "場景 5 完成：topology coupling 解除。"
 ```
 
+> **Superseded by ADR-0001 + refactor Task 2/6：** two claims above are exactly what ADR-0001
+> rejected. (1) "貼一段 config，別無其他" / config-only in-process onboarding: adding a `tool-d`
+> entry to `sessions.yaml` now onboards nothing, because no running process selects it — onboarding
+> a new tool is the explicit, observable workload action
+> `docker compose --profile onboarding up -d listener-tool-d`, simulating a controller creating a
+> new workload. (2) the offboarding aside ("把 tool-d 整段刪掉 → ... → server 端 durable consumer
+> 一併刪除，永久退場"): config-only deletion of a `sessions.yaml` entry never deletes a consumer
+> now — the selected session just fails closed as `INVALID_SPEC`; a real durable delete only exists
+> in the not-yet-built finalizer protocol (ADR-0001 §2). The authoritative version is
+> `demo/05-onboarding.sh` (refactor Task 6), which adds/validates the entry, proves port 8084 stays
+> absent until the explicit profile command runs, and cleans up without claiming permanent
+> offboarding.
+
 - [ ] **Step 3: chmod + 手動走一遍場景 5（最快驗證端到端）**
 
 ```bash
@@ -2363,3 +2443,11 @@ git commit -m "demo: watch-status table + five scenario scripts (change-flow, de
 ## 完成定義
 
 全部 task 打勾後：`demo/smoke-test.sh` 綠燈、五支 demo 腳本可照 spec §8 演完、`gradle test` 38 tests 全過、git log 乾淨（每 task 至少一個 commit、無 Co-Authored-By、未 push）。
+
+> **Status:** This prototype's completion definition was met and independently reviewed
+> (`.superpowers/sdd/task-1..7-report.md`, `.superpowers/sdd/progress.md`). It is superseded as the
+> production completion bar by
+> [`docs/plans/2026-07-13-single-session-pod-refactor.md`](2026-07-13-single-session-pod-refactor.md)'s
+> own "Completion evidence" section, which this refactor plan's Task 7 is responsible for satisfying.
+> See that plan and [ADR-0001](../adr/0001-single-session-pod-runtime.md) for the current authoritative
+> direction.

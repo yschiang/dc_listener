@@ -397,23 +397,47 @@ runtime implementation or embedding dynamic listener fields in the service defin
 - Modify: `docs/plans/2026-07-13-single-session-pod-refactor.md`
 - Modify if needed: `README.md`
 
-- [ ] **RED/document contract:** Search for normative claims that the initial production runtime is a
+- [x] **RED/document contract:** Search for normative claims that the initial production runtime is a
   multi-session ListenerCell, uses virtual threads for isolation, dynamically onboards by adding YAML, or
   deletes consumers when an entry disappears. Record each conflicting section before editing.
-- [ ] Mark historical prototype sections as superseded by ADR-0001 and link to this refactor plan. Preserve
+  Recorded in `.superpowers/sdd/refactor-task-7-report.md` (11 sections in the spec doc, 6 in the plan doc
+  — ListenerCell/virtual-thread-isolation claims, delete+recreate fallback, config-only onboard/offboard,
+  and the stale scenario-1/scenario-5 wording).
+- [x] Mark historical prototype sections as superseded by ADR-0001 and link to this refactor plan. Preserve
   history, but make it unmistakable that multi-session is not the initial production model.
-- [ ] Document what the prototype now proves and what it deliberately does not prove: no CRD/controller,
+  Done in both docs via inline "Superseded by ADR-0001" banners (top-of-doc + per-section); no prose
+  deleted.
+- [x] Document what the prototype now proves and what it deliberately does not prove: no CRD/controller,
   Lease fencing, finalizer cleanup handshake, UID-derived durable identity, or production workload
   generation yet.
-- [ ] Run final verification from a clean demo stack:
+  Added as new §1.1 in `docs/specs/2026-07-13-listener-session-nats-prototype-design.md`.
+- [x] Run final verification from a clean demo stack:
   full Java tests, shell syntax/contract tests, `docker compose config --quiet`, real smoke, dynamic config
   no-restart proof, `demo/consumer-safety-test.sh`, outage recovery, isolated service failure, replay, and
   the profiled tool-d onboarding/controller-contract scenario including its cleanup.
+  All green — 77 Java tests (0 failures), `sh -n`/`dash -n` clean on every `demo/*.sh`, `docker compose
+  config --quiet` clean, `demo/demo-contract-test.sh` PASS, scenarios 1–5 PASS (unattended, real evidence),
+  `demo/consumer-safety-test.sh` PASS, `demo/smoke-test.sh` PASS. Full transcript and one sequencing note
+  (smoke-test.sh's synthetic `smoke-tool-*` durables collide with the durable-ownership latch if run against
+  containers already latched by the scenario suite's `listener-tool-*` config — this is the Task 2 ownership
+  guard working as designed, not a regression; `demo/README.md`'s documented order — smoke test before
+  `run-demo.sh up`/scenarios — avoids it) are in `.superpowers/sdd/refactor-task-7-report.md`.
 - [ ] Run a final **new** independent reviewer over the complete ADR-to-code diff with extra-high rigor.
   The reviewer must check architecture conformance, accidental consumer deletion paths, one-session
   ownership, Linux portability, test evidence, and stale documentation.
-- [ ] Update this plan's checkboxes/evidence without folding unrelated local files into the commit.
+  Not run by this task — per the controlling brief this is the controller's own follow-up step over the
+  complete ADR-to-code diff, not part of this task's scope.
+- [x] Update this plan's checkboxes/evidence without folding unrelated local files into the commit.
 - [ ] Commit: `align docs with single session runtime`
+
+**Known code-hygiene leftovers (non-blocking, carried from per-task reviews, for the final aggregate
+reviewer to triage — deliberately left unfixed by this task):**
+
+- `Main.java:29` — stale `"listener-runtime up"` log string (predates the Task 5 per-tool Compose cutover).
+- `ListenerSession.java:14` — stale comment claiming in-process isolation (predates ADR-0001 §1/§5).
+- `FakeNatsLink.java:15` — stale reference to the deleted multi-session `ReconcilerTest`.
+- `StartupConfig` — `STATUS_PORT` parsing has no 0–65535 range validation (silently narrows/accepts
+  out-of-range values instead of rejecting at startup).
 
 ## Explicit follow-up project: production controller
 
@@ -442,3 +466,8 @@ The refactor is complete only when:
 - all automated and real demo checks pass;
 - every task and the final aggregate diff have independent-agent approval;
 - all commits are local and no remote was pushed.
+
+**Status after Task 7's verification run (see `.superpowers/sdd/refactor-task-7-report.md` for full
+evidence):** every bullet above is met by real, independently-reproduced evidence except the final
+aggregate-diff approval, which this task explicitly does not perform (it is the controller's next step,
+per the brief). All commits remain local; nothing was pushed.
