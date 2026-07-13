@@ -224,8 +224,15 @@ A: 每個 tool 一個獨立 Pod；config 外部化（現狀）
    │  改 config 不需要 deployment——runtime 運行中 hot reload；
    │  但仍要進 gitops 改 config（走 pipeline → 變更單照走）。
    │  只有 image/資源這類 static 欄位才需要 deployment。
-   ├─ 得到：改 config 不用 deployment、tool 之間故障互不牽連、斷線降級自癒、
-   │        壞 config 不倒站（沿用 last-good）、durable 身分不會被誤刪（T2）
+   ├─ 得到（這一步買到的核心能力）：
+   │   1. 改 config 不需要 deployment——runtime 運行中 hot reload
+   │   2. 壞 config 不 crash、也不弄壞線上行為——整份讀不懂就沿用
+   │      last-good 照跑 + 回報 specError；只有自己 entry 非法才 fail-closed
+   │      （停收訊息但 process 活著、宣告修好原地復原）
+   │   3. NATS 斷線不倒站——降級 DEGRADED、有界重試、連回自動恢復（T1）
+   │   4. durable 身分不會被誤刪——任何 config 變化都觸不到 consumer 刪除（T2）
+   │   5. （待確認）tool 之間故障互不牽連（一 tool 一 Pod）——若最原本已是
+   │      每 tool 獨立 deployment，此項是「保留既有」而非新增
    ├─ 尚痛：所有 tool 共用一份 config——牽一髮動全身；看不到 applied 了沒；
    │        下架靠人工；變更單照走
    │
