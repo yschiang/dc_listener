@@ -83,3 +83,41 @@ RBAC + 「dynamic 變更可證明不觸碰 workload」的測試證據（gate 1/8
 
 若此假設被推翻（CRD 寫入仍需逐次報 change），組織成本差距消失，方案 A 重新可考慮——
 屆時退場頻率與人工風險成為主要判準，且必須先修 ADR-0001。
+
+## 5. 附錄：兩條四層鏈對照
+
+Config 在系統裡有四份——一份真相、三份衍生，下游全部可從上游重建，runtime 不持久化
+任何 config（last-good 僅在記憶體）。兩案的鏈：
+
+```text
+GitOps:  operator ──PR──► ① git values entry                【真相】
+                             │ CI render + ArgoCD/Flux sync  ←通用搬運工
+                             ▼
+                          ② ConfigMap projection（etcd）     【衍生】
+                             │ kubelet 同步
+                             ▼
+                          ③ node 掛載檔 ──► ④ JVM in-memory
+                                              │
+                                              └► /status ► dashboard   ✗ 回不到①
+
+CRD:     operator ──API──► ① ToolListener CR（etcd）         【真相】
+                             │ domain controller             ←懂 UID/finalizer/status
+                             ▼
+                          ② ConfigMap projection（etcd）     【衍生】
+                             │ kubelet 同步
+                             ▼
+                          ③ node 掛載檔 ──► ④ JVM in-memory
+                                              │
+                                              └► /status ► controller ► 寫回①.status ✓
+```
+
+- **②③④ 兩案逐字相同**——傳導機制不是差別；差別在 ① 的物件模型（純文字 vs 有
+  status 子資源/deletionTimestamp/finalizer/UID 的物件）與 ①→② 搬運工是否懂 domain。
+- **Status 回流**：GitOps 斷頭（觀測與真相永久分居）；CRD 閉環（declared/applied 在
+  真相物件會合）。
+- **刪除流**：GitOps 刪 entry = sync 直接 prune workload，Pod 被殺無 drain 協定、
+  consumer 留置等人工 runbook，宣告刪除與資產清理之間無擋板；CRD 靠 finalizer 把刪除
+  變成受監督流程（deletionTimestamp → termination request → drain+刪 consumer →
+  精確 UID/opId ack → 移除 workload → 移除 finalizer）。
+- 兩案 runtime 唯一持久資產都在 NATS 側（durable consumer cursor），不在 config 鏈上
+  ——這是「config 消失 ≠ 退場」的根本原因。
