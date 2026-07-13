@@ -1,0 +1,80 @@
+# Fixture v1: ToolListener.spec → per-tool runtime projection
+# 對應 spec: docs/specs/2026-07-14-config-delivery-and-controller-design.md §1
+# 三份文件：(A) ToolListener CR、(B) 中繼版 GitOps 投影、(C) controller 投影（含退場例）
+---
+# (A) ToolListener CR（demo controller 的輸入；phase 2）
+apiVersion: listener.dc/v1alpha1
+kind: ToolListener
+metadata:
+  name: tool-a
+  uid: 8f2a1c3e-0000-4000-8000-000000000001   # K8s 指派；durable hash 輸入
+  generation: 4
+  finalizers: [listener.dc/cleanup]
+spec:
+  stream: TOOLS
+  subject: "tool.a.>"
+  desiredState: RUNNING
+  configVersion: "v42"
+  retry: { interval: 5s, maxAttempts: 10 }
+  drainTimeout: 30s
+  workload:
+    image: dc/listener:1.2
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 512Mi }
+---
+# (B) 中繼版投影（phase 1；GitOps render 寫入 ConfigMap listener-tool-a 的 data）
+# owner = onboard 時產生的 ULID；durable = operator 配置名（latch 行為不變）
+projection:
+  schema: 1
+  owner: "01J2ZK5T9GXW4Q8RB3YV6M7N2A"          # instanceId (ULID)，CI 檢查不可變
+  revision: "9d1b9ebf"                          # git SHA
+  operation: null
+sessions:
+  tool-a:
+    desiredState: RUNNING
+    configVersion: "v42"
+    config:
+      subject: "tool.a.>"
+      durable: "tool-a-durable"
+      retry: { interval: 5s, maxAttempts: 10 }
+      drainTimeout: 30s
+---
+# (C) controller 投影（phase 2；reconciler 由 (A) 生成）
+# durable = "tl-" + base32_rfc4648_lower(sha256(clusterId + "/" + stream + "/" + uid))[:26]
+projection:
+  schema: 1
+  owner: "8f2a1c3e-0000-4000-8000-000000000001"
+  generation: 4
+  revision: "7"                                 # controller 遞增
+  operation: null
+sessions:
+  tool-a:
+    desiredState: RUNNING
+    configVersion: "v42"
+    config:
+      subject: "tool.a.>"
+      durable: "tl-mfrggzdfmztwq2lknnwg23tpob"  # 固定長 29，[a-z2-7-]
+      retry: { interval: 5s, maxAttempts: 10 }
+      drainTimeout: 30s
+---
+# (C') 同一投影的退場形態（gate 4；controller 觀察到 deletionTimestamp 後 patch）
+projection:
+  schema: 1
+  owner: "8f2a1c3e-0000-4000-8000-000000000001"
+  generation: 4
+  revision: "8"
+  operation:
+    id: "term-8f2a1c3e-0001"
+    type: Terminate
+    assets: { stream: TOOLS, durable: "tl-mfrggzdfmztwq2lknnwg23tpob" }
+    policy: DeleteConsumer
+sessions:
+  tool-a:
+    desiredState: RUNNING    # operation 非 null 時 runtime 忽略 desiredState（spec §1d）
+    configVersion: "v42"
+    config:
+      subject: "tool.a.>"
+      durable: "tl-mfrggzdfmztwq2lknnwg23tpob"
+      retry: { interval: 5s, maxAttempts: 10 }
+      drainTimeout: 30s
