@@ -11,10 +11,11 @@ public final class SessionStateMachine {
     private ObservedState state = ObservedState.STANDBY;
     private SessionSpec spec;        // 已生效（applied）
     private SessionSpec pending;     // 等 drain 完成才套用
+    private String latchedDurable;   // 首個有效 spec 的 durable，鎖定整個 process 生命週期（ADR-0001 §2/§3）
     private int failures;            // 連續 connect 失敗次數（含初次）
     private String reason = "";
     private Instant lastTransition = Instant.now();
-    private boolean terminating;     // YAML entry 已刪除 → STOPPED 後刪 consumer、結束 thread
+    private boolean shuttingDown;    // 程序收尾（SIGTERM）：drain → STOPPED → close + 結束 loop，durable 保留
 
     public SessionStateMachine(String name) { this.name = name; }
 
@@ -30,7 +31,7 @@ public final class SessionStateMachine {
                 if (state == ObservedState.CONNECTING) {
                     failures = 0;
                     reason = "";
-                    moveTo(pending != null || terminating
+                    moveTo(pending != null || shuttingDown
                             ? ObservedState.DRAINING : ObservedState.ACTIVE);
                 }
             }
@@ -47,11 +48,21 @@ public final class SessionStateMachine {
             }
             case Event.DrainComplete dc -> onDrainComplete();
             case Event.DrainTimeout dt -> onDrainTimeout();
-            case Event.Terminate x -> onTerminate();
+            case Event.Shutdown x -> onShutdown();
         }
     }
 
     private void onSpec(SessionSpec next) {
+        // durable 是不可變 ownership 身分：首個有效 spec 鎖定，之後任何變更 = 本地 immutable-field 違規，
+        // 立即 FAILED/INVALID_SPEC，不採用新 spec、不遞增 retry、不連線（ADR-0001；controller resolution #1）。
+        if (latchedDurable != null && !latchedDurable.equals(next.durable())) {
+            pending = null;
+            reason = "INVALID_SPEC: durable '" + next.durable() + "' != latched '" + latchedDurable + "'";
+            moveTo(ObservedState.FAILED);
+            return;
+        }
+        if (latchedDurable == null) latchedDurable = next.durable();
+
         switch (state) {
             case ACTIVE -> {
                 if (hotOnly(spec, next)) spec = next;              // retry/drainTimeout 熱生效（spec §5.1）
@@ -91,7 +102,7 @@ public final class SessionStateMachine {
 
     private void onDrainComplete() {
         if (state != ObservedState.DRAINING) return;
-        if (terminating) { moveTo(ObservedState.STOPPED); return; }
+        if (shuttingDown) { moveTo(ObservedState.STOPPED); return; }
         if (pending != null) adopt(pending);
         converge();
     }
@@ -99,12 +110,12 @@ public final class SessionStateMachine {
     private void onDrainTimeout() {
         if (state != ObservedState.DRAINING) return;
         reason = "DRAIN_TIMEOUT";
-        if (terminating) moveTo(ObservedState.STOPPED);
+        if (shuttingDown) moveTo(ObservedState.STOPPED);
         else { pending = null; moveTo(ObservedState.FAILED); }
     }
 
-    private void onTerminate() {
-        terminating = true;
+    private void onShutdown() {
+        shuttingDown = true;
         switch (state) {
             case ACTIVE -> moveTo(ObservedState.DRAINING);
             case DRAINING -> { }
@@ -131,7 +142,7 @@ public final class SessionStateMachine {
     public synchronized SessionSpec spec() { return spec; }
     public synchronized String reason() { return reason; }
     public synchronized int retryAttempt() { return failures; }
-    public synchronized boolean terminating() { return terminating; }
+    public synchronized boolean shuttingDown() { return shuttingDown; }
     public synchronized Instant lastTransitionTime() { return lastTransition; }
     public synchronized String declaredConfigVersion() {
         var d = pending != null ? pending : spec;
@@ -153,7 +164,7 @@ public final class SessionStateMachine {
             String reason,
             java.time.Instant lastTransitionTime,
             int retryAttempt,
-            boolean terminating) {}
+            boolean shuttingDown) {}
 
     public synchronized MachineView view() {
         var d = pending != null ? pending : spec;
@@ -161,6 +172,6 @@ public final class SessionStateMachine {
                 d == null ? null : d.desiredState(),
                 d == null ? null : d.configVersion(),
                 spec == null ? null : spec.configVersion(),
-                reason, lastTransition, failures, terminating);
+                reason, lastTransition, failures, shuttingDown);
     }
 }

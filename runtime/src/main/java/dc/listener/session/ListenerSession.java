@@ -9,6 +9,7 @@ import java.util.Deque;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 一個 session = 專屬 NatsLink + 專屬 virtual thread + mailbox；跨 session 零共享可變狀態（P3）。 */
 public final class ListenerSession {
@@ -23,9 +24,11 @@ public final class ListenerSession {
     private final Deque<InFlightMsg> inFlight = new ArrayDeque<>();
     private volatile long pendingCount = -1;
     private volatile boolean terminated;
+    private final AtomicBoolean started = new AtomicBoolean();
     private Instant drainDeadline;
 
     public ListenerSession(String name, NatsLink link, long processDelayMs) {
+        if (name == null || name.isBlank()) throw new IllegalArgumentException("session name must be non-blank");
         this.name = name;
         this.link = link;
         this.pipeline = new PipelineStub(processDelayMs);
@@ -33,9 +36,17 @@ public final class ListenerSession {
         this.gate = new AdmissionGate(machine);
     }
 
-    public void start() { Thread.ofVirtual().name("session-" + name).start(this::run); }
+    /** 冪等：重複呼叫只會有一條 actor loop（ownership 的一 process 一 loop）。 */
+    public void start() {
+        if (started.compareAndSet(false, true)) {
+            Thread.ofVirtual().name("session-" + name).start(this::run);
+        }
+    }
 
     public void deliver(Event e) { mailbox.add(e); }
+
+    /** 不可變身分，供 ownership 驗證。 */
+    public String name() { return name; }
 
     public boolean isTerminated() { return terminated; }
 
@@ -45,9 +56,8 @@ public final class ListenerSession {
                 ObservedState s = machine.state();
                 switch (s) {
                     case STANDBY, STOPPED, FAILED -> {
-                        if (s == ObservedState.STOPPED && machine.terminating()) {
-                            if (machine.spec() != null) link.deleteConsumer(machine.spec());
-                            link.close();
+                        if (s == ObservedState.STOPPED && machine.shuttingDown()) {
+                            link.close();          // durable 保留（ADR-0001：無 finalizer 前不刪 consumer）
                             terminated = true;
                             return;
                         }
@@ -55,26 +65,26 @@ public final class ListenerSession {
                             link.close();
                         }
                         Event e = mailbox.poll(2, TimeUnit.SECONDS);
-                        if (e != null) machine.onEvent(e); else refreshPending();
+                        if (e != null) handle(e); else refreshPending();
                     }
                     case CONNECTING -> {
                         link.close();   // 重連 = 與初次完全相同的路徑（spec §4.2）
                         try {
                             link.connect(machine.spec());
-                            machine.onEvent(new Event.ConnectOk());
+                            handle(new Event.ConnectOk());
                         } catch (LinkException ex) {
-                            machine.onEvent(new Event.ConnectFailed(ex.reasonCode()));
+                            handle(new Event.ConnectFailed(ex.reasonCode()));
                         }
                     }
                     case ACTIVE -> {
                         Event e = mailbox.poll();
-                        if (e != null) { machine.onEvent(e); continue; }
+                        if (e != null) { handle(e); continue; }
                         if (inFlight.isEmpty()) {
                             try {
                                 inFlight.addAll(link.fetch(FETCH_BATCH, Duration.ofSeconds(1)));
                                 refreshPending();
                             } catch (LinkException ex) {
-                                machine.onEvent(new Event.FetchError(ex.reasonCode()));
+                                handle(new Event.FetchError(ex.reasonCode()));
                                 continue;
                             }
                         }
@@ -83,7 +93,7 @@ public final class ListenerSession {
                                 processOne();
                             } catch (LinkException ex) {
                                 inFlight.clear();
-                                machine.onEvent(new Event.FetchError(ex.reasonCode()));
+                                handle(new Event.FetchError(ex.reasonCode()));
                             }
                         }
                     }
@@ -92,24 +102,24 @@ public final class ListenerSession {
                             drainDeadline = Instant.now().plus(machine.spec().drainTimeout());
                         }
                         Event e = mailbox.poll();
-                        if (e != null) { machine.onEvent(e); continue; }
+                        if (e != null) { handle(e); continue; }
                         if (inFlight.isEmpty()) {
-                            machine.onEvent(new Event.DrainComplete());
+                            handle(new Event.DrainComplete());
                         } else if (Instant.now().isAfter(drainDeadline)) {
                             inFlight.clear();   // 未 ack → 之後 redelivery（at-least-once）
-                            machine.onEvent(new Event.DrainTimeout());
+                            handle(new Event.DrainTimeout());
                         } else {
                             try {
                                 processOne();
                             } catch (LinkException ex) {
                                 inFlight.clear();
-                                machine.onEvent(new Event.FetchError(ex.reasonCode()));
+                                handle(new Event.FetchError(ex.reasonCode()));
                             }
                         }
                     }
                     case DEGRADED -> {
                         Event e = mailbox.poll(retryDelay().toMillis(), TimeUnit.MILLISECONDS);
-                        machine.onEvent(e != null ? e : new Event.RetryTick());
+                        handle(e != null ? e : new Event.RetryTick());
                     }
                 }
                 if (machine.state() != ObservedState.DRAINING) drainDeadline = null;
@@ -117,6 +127,13 @@ public final class ListenerSession {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /** 唯一的事件入口：任何轉移到 FAILED 都在 link 關閉前清空 in-flight handle，
+     *  避免恢復後對「上一條連線」的 handle 做 ack（含 durable-mutating SpecChanged 的內部拒絕）。 */
+    private void handle(Event e) {
+        machine.onEvent(e);
+        if (machine.state() == ObservedState.FAILED) inFlight.clear();
     }
 
     private void processOne() throws LinkException {

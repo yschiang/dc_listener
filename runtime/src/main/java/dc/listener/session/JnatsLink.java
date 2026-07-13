@@ -42,14 +42,9 @@ public final class JnatsLink implements NatsLink {
                     .filterSubject(spec.subject())
                     .ackPolicy(AckPolicy.Explicit)   // DeliverPolicy 用預設 All（spec §4.3）
                     .build();
-            var jsm = nc.jetStreamManagement();
-            try {
-                jsm.addOrUpdateConsumer(STREAM, cc);
-            } catch (JetStreamApiException e) {
-                // subject 換版時 server 拒絕 filter 更新 → delete + recreate（spec §4.3 fallback）
-                jsm.deleteConsumer(STREAM, spec.durable());
-                jsm.addOrUpdateConsumer(STREAM, cc);
-            }
+            // in-place createOrUpdate；durable/filter 更新一律原地生效，永不 delete+recreate（ADR-0001）。
+            // server 拒絕（含 filter 更新失敗）→ JetStreamApiException → RESOURCE_NOT_FOUND → DEGRADED 有界重試。
+            nc.jetStreamManagement().addOrUpdateConsumer(STREAM, cc);
             consumer = nc.getStreamContext(STREAM).getConsumerContext(spec.durable());
         } catch (JetStreamApiException e) {
             close();
@@ -98,17 +93,6 @@ public final class JnatsLink implements NatsLink {
 
     @Override
     public boolean isConnected() { return nc != null && nc.getStatus() == Connection.Status.CONNECTED; }
-
-    @Override
-    public void deleteConsumer(SessionSpec spec) {
-        // 用短命連線執行，不依賴主連線是否存活（offboarding 時 NATS 可能剛好不在）
-        try (Connection c = Nats.connect(options())) {
-            c.jetStreamManagement().deleteConsumer(STREAM, spec.durable());
-        } catch (Exception e) {
-            // ponytail: best-effort 清理；正式版需 retry 或後台 GC 無主 consumer
-            System.err.println("[" + spec.name() + "] deleteConsumer failed: " + e.getMessage());
-        }
-    }
 
     @Override
     public void close() {

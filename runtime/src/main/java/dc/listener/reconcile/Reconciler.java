@@ -9,24 +9,25 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /**
  * 宣告 → 現實的單向收斂（spec §5.2）：parse → diff → 投遞事件到 per-session mailbox。
  * 不直接碰 connection；一個 session 卡住不阻塞其他 session 的 reconcile（P3）。
+ *
+ * <p>ADR-0001：宣告消失不是 offboarding。此處只投遞 {@code SpecInvalid("declaration missing")} 給既有
+ * instance（fail closed、保留 durable），絕不退場/替換/刪 consumer。Task 4 會以 SingleSessionReconciler
+ * 取代這個相容層。
  */
 public final class Reconciler {
+    static final String DECLARATION_MISSING = "declaration missing";
+
     private final Path file;
     private final Function<String, ListenerSession> factory;
     private final Map<String, ListenerSession> sessions = new ConcurrentHashMap<>();
-    private final Set<String> retiring = ConcurrentHashMap.newKeySet();
-    private Map<String, SessionSpec> lastValid = Map.of();
-    private Map<String, String> lastInvalid = Map.of();
     private final Map<String, SessionSpec> deliveredValid = new HashMap<>();
     private final Map<String, String> deliveredInvalid = new HashMap<>();
     private volatile String specError;
@@ -66,89 +67,28 @@ public final class Reconciler {
         }
         specError = null;
 
-        lastValid = Map.copyOf(parsed.valid());
-        lastInvalid = Map.copyOf(parsed.invalid());
-
-        Set<String> restarted = new HashSet<>();
-        for (var entry : List.copyOf(sessions.entrySet())) {
-            if (entry.getValue().isTerminated() && finishRetirement(entry.getKey(), entry.getValue())) {
-                restarted.add(entry.getKey());
-            }
-        }
-
+        // 宣告消失 → 對既有 instance fail closed（保留 durable），不退場、不刪 consumer（ADR-0001）。
         for (String name : List.copyOf(sessions.keySet())) {
             if (!parsed.valid().containsKey(name) && !parsed.invalid().containsKey(name)) {
-                retire(name, sessions.get(name));
+                deliverInvalid(name, DECLARATION_MISSING);
             }
         }
         parsed.valid().forEach((name, spec) -> {
-            if (!restarted.contains(name) && !retiring.contains(name)
-                    && (!sessions.containsKey(name) || !spec.equals(deliveredValid.get(name)))) {
+            if (!sessions.containsKey(name) || !spec.equals(deliveredValid.get(name))) {
                 sessionFor(name).deliver(new Event.SpecChanged(spec));
                 deliveredValid.put(name, spec);
                 deliveredInvalid.remove(name);
             }
         });
-        parsed.invalid().forEach((name, err) -> {
-            if (!restarted.contains(name) && !retiring.contains(name)
-                    && (!sessions.containsKey(name) || !err.equals(deliveredInvalid.get(name)))) {
-                sessionFor(name).deliver(new Event.SpecInvalid(err));
-                deliveredInvalid.put(name, err);
-                deliveredValid.remove(name);
-            }
-        });
+        parsed.invalid().forEach(this::deliverInvalid);
     }
 
-    private void retire(String name, ListenerSession session) {
-        if (!retiring.add(name)) return;
-        session.deliver(new Event.Terminate());
-        Thread.ofVirtual().name("session-retire-" + name).start(() -> {
-            try {
-                while (!session.isTerminated()) Thread.sleep(10);
-                while (true) {
-                    synchronized (this) {
-                        if (finishRetirement(name, session)) return;
-                    }
-                    Thread.sleep(500);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-    }
-
-    /** 移除已退場 instance；若同名宣告已恢復，立即建立 replacement，不必等下一次檔案變更。 */
-    private boolean finishRetirement(String name, ListenerSession session) {
-        sessions.remove(name, session);
-        if (sessions.containsKey(name)) {
-            retiring.remove(name);
-            return true;
+    private void deliverInvalid(String name, String error) {
+        if (!sessions.containsKey(name) || !error.equals(deliveredInvalid.get(name))) {
+            sessionFor(name).deliver(new Event.SpecInvalid(error));
+            deliveredInvalid.put(name, error);
+            deliveredValid.remove(name);
         }
-        SessionSpec desired = lastValid.get(name);
-        String error = lastInvalid.get(name);
-        try {
-            if (desired != null) {
-                sessionFor(name).deliver(new Event.SpecChanged(desired));
-                deliveredValid.put(name, desired);
-                deliveredInvalid.remove(name);
-                retiring.remove(name);
-                return true;
-            }
-            if (error != null) {
-                sessionFor(name).deliver(new Event.SpecInvalid(error));
-                deliveredInvalid.put(name, error);
-                deliveredValid.remove(name);
-                retiring.remove(name);
-                return true;
-            }
-        } catch (RuntimeException e) {
-            System.err.println("[" + name + "] replacement failed, retrying: " + e.getMessage());
-            return false;
-        }
-        deliveredValid.remove(name);
-        deliveredInvalid.remove(name);
-        retiring.remove(name);
-        return true;
     }
 
     private ListenerSession sessionFor(String name) {

@@ -177,39 +177,39 @@ class SessionStateMachineTest {
         assertEquals("v2", m.appliedConfigVersion());
     }
 
-    @Test void terminateFromActiveDrainsThenStops() {
+    @Test void shutdownFromActiveDrainsThenStops() {
         var m = activeMachine();
-        m.onEvent(new Event.Terminate());
+        m.onEvent(new Event.Shutdown());
         assertEquals(DRAINING, m.state());
-        assertTrue(m.terminating());
+        assertTrue(m.shuttingDown());
         m.onEvent(new Event.DrainComplete());
         assertEquals(STOPPED, m.state());
     }
 
-    @Test void terminateFromStandbyStopsImmediately() {
+    @Test void shutdownFromStandbyStopsImmediately() {
         var m = new SessionStateMachine("t");
-        m.onEvent(new Event.Terminate());
+        m.onEvent(new Event.Shutdown());
         assertEquals(STOPPED, m.state());
-        assertTrue(m.terminating());
+        assertTrue(m.shuttingDown());
     }
 
-    @Test void terminateDuringDrainingStaysDraining() {
+    @Test void shutdownDuringDrainingStaysDraining() {
         var m = activeMachine();
         m.onEvent(new Event.SpecChanged(spec(DesiredState.RUNNING, "v2", "s2", 10)));  // → DRAINING
-        m.onEvent(new Event.Terminate());
+        m.onEvent(new Event.Shutdown());
         assertEquals(DRAINING, m.state());
-        assertTrue(m.terminating());
+        assertTrue(m.shuttingDown());
         m.onEvent(new Event.DrainComplete());
         assertEquals(STOPPED, m.state());
     }
 
-    @Test void drainTimeoutWhileTerminatingStops() {
+    @Test void drainTimeoutWhileShuttingDownStops() {
         var m = activeMachine();
-        m.onEvent(new Event.Terminate());           // → DRAINING, terminating=true
+        m.onEvent(new Event.Shutdown());            // → DRAINING, shuttingDown=true
         m.onEvent(new Event.DrainTimeout());
         assertEquals(STOPPED, m.state());
         assertEquals("DRAIN_TIMEOUT", m.reason());
-        assertTrue(m.terminating());
+        assertTrue(m.shuttingDown());
     }
 
     @Test void stoppedRestartsOnRunningSpec() {
@@ -218,5 +218,84 @@ class SessionStateMachineTest {
         assertEquals(STOPPED, m.state());
         m.onEvent(new Event.SpecChanged(running("v2")));
         assertEquals(CONNECTING, m.state());
+    }
+
+    // --- durable ownership latch (ADR-0001 §2/§3; Task 2) ---
+    static SessionSpec withDurable(String ver, String durable) {
+        return new SessionSpec("t", DesiredState.RUNNING, ver, "tool.t.events", durable,
+                null, 10, Duration.ofSeconds(30));
+    }
+
+    @Test void durableMutationFailsInvalidSpecWithoutAdopting() {
+        var m = activeMachine();                         // latched durable dur-t, applied v1
+        m.onEvent(new Event.SpecChanged(withDurable("v2", "dur-t-NEW")));
+        assertEquals(FAILED, m.state());
+        assertTrue(m.reason().startsWith("INVALID_SPEC"), m.reason());
+        assertEquals("dur-t", m.spec().durable(), "latched durable must not be adopted");
+        assertEquals("v1", m.appliedConfigVersion(), "applied spec must not change");
+        assertEquals(0, m.retryAttempt(), "a latch rejection must not increment retries");
+    }
+
+    @Test void restoringLatchedDurableResumesSameInstance() {
+        var m = activeMachine();
+        m.onEvent(new Event.SpecChanged(withDurable("v2", "dur-t-NEW")));
+        assertEquals(FAILED, m.state());
+        m.onEvent(new Event.SpecChanged(running("v3")));   // original durable dur-t restored
+        assertEquals(CONNECTING, m.state());
+        assertEquals("", m.reason());
+        assertEquals("v3", m.appliedConfigVersion());
+    }
+
+    @Test void latchFromStandbyFirstSpecRejectsLaterDurableMutation() {
+        var m = new SessionStateMachine("t");
+        m.onEvent(new Event.SpecChanged(spec(DesiredState.STANDBY, "v1", "tool.t.events", 10)));  // latch dur-t
+        assertEquals(STANDBY, m.state());
+        m.onEvent(new Event.SpecChanged(withDurable("v2", "dur-t-NEW")));
+        assertEquals(FAILED, m.state());
+        assertTrue(m.reason().startsWith("INVALID_SPEC"), m.reason());
+        assertEquals("dur-t", m.spec().durable(), "latch is set from the first (STANDBY) spec");
+    }
+
+    @Test void durableMutationFromDegradedStillFailsInvalid() {
+        var m = new SessionStateMachine("t");
+        m.onEvent(new Event.SpecChanged(running("v1")));                 // latch dur-t, CONNECTING
+        m.onEvent(new Event.ConnectFailed("MESSAGING_ENDPOINT_UNREACHABLE"));
+        assertEquals(DEGRADED, m.state());
+        m.onEvent(new Event.SpecChanged(withDurable("v2", "dur-t-NEW"))); // durable change from DEGRADED
+        assertEquals(FAILED, m.state());
+        assertTrue(m.reason().startsWith("INVALID_SPEC"), m.reason());
+        assertEquals("dur-t", m.spec().durable());
+    }
+
+    // --- exact error classifications (Task 2 controller resolution #1) ---
+    @Test void resourceNotFoundClassificationDegradesAndCannotExceedMaxAttempts() {
+        var m = new SessionStateMachine("t");
+        m.onEvent(new Event.SpecChanged(spec(DesiredState.RUNNING, "v1", "s", 2)));  // maxAttempts=2
+        m.onEvent(new Event.ConnectFailed("RESOURCE_NOT_FOUND"));   // in-place update rejected by server
+        assertEquals(DEGRADED, m.state());
+        assertEquals(1, m.retryAttempt());
+        assertEquals("RESOURCE_NOT_FOUND", m.reason());
+        m.onEvent(new Event.RetryTick());
+        m.onEvent(new Event.ConnectFailed("RESOURCE_NOT_FOUND"));
+        assertEquals(DEGRADED, m.state());
+        assertEquals(2, m.retryAttempt());
+        m.onEvent(new Event.RetryTick());
+        m.onEvent(new Event.ConnectFailed("RESOURCE_NOT_FOUND"));
+        assertEquals(FAILED, m.state());
+        assertEquals("RETRY_EXHAUSTED", m.reason());
+        m.onEvent(new Event.RetryTick());                            // cannot retry past exhaustion
+        assertEquals(FAILED, m.state());
+    }
+
+    @Test void endpointUnreachableClassificationFollowsBoundedRetry() {
+        var m = new SessionStateMachine("t");
+        m.onEvent(new Event.SpecChanged(spec(DesiredState.RUNNING, "v1", "s", 1)));  // maxAttempts=1
+        m.onEvent(new Event.ConnectFailed("MESSAGING_ENDPOINT_UNREACHABLE"));
+        assertEquals(DEGRADED, m.state());
+        assertEquals(1, m.retryAttempt());
+        m.onEvent(new Event.RetryTick());
+        m.onEvent(new Event.ConnectFailed("MESSAGING_ENDPOINT_UNREACHABLE"));
+        assertEquals(FAILED, m.state());
+        assertEquals("RETRY_EXHAUSTED", m.reason());
     }
 }

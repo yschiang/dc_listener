@@ -19,9 +19,6 @@ public interface NatsLink {
 
     boolean isConnected();
 
-    /** offboarding 專用：刪 server 端 durable consumer（best-effort）。 */
-    void deleteConsumer(SessionSpec spec);
-
-    /** 冪等、不丟例外。 */
+    /** 冪等、不丟例外。程序關閉與宣告消失都只 close，durable 保留（ADR-0001：無 finalizer 前不得刪 consumer）。 */
     void close();
 }

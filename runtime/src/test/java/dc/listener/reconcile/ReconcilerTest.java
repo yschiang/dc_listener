@@ -7,11 +7,9 @@ import dc.listener.session.ObservedState;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,6 +29,18 @@ class ReconcilerTest {
                   subject: %s
                   durable: dur-%s
             """.formatted(name, desired, ver, subject, name);
+    }
+
+    static String yamlDurable(String name, String desired, String subject, String ver, String durable) {
+        return """
+            sessions:
+              %s:
+                desiredState: %s
+                configVersion: %s
+                config:
+                  subject: %s
+                  durable: %s
+            """.formatted(name, desired, ver, subject, durable);
     }
 
     @Test
@@ -64,15 +74,37 @@ class ReconcilerTest {
     }
 
     @Test
-    void removedEntryTerminatesSessionAndDeletesConsumer() {
-        rec.apply(yaml("tool-a", "RUNNING", "tool.a.events", "v1"));
+    void removedEntryFailsInvalidKeepingInstanceAndDurableLatch() {
+        rec.apply(yaml("tool-a", "RUNNING", "tool.a.events", "v1"));   // durable dur-tool-a
         var s = rec.sessions().get("tool-a");
         Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE, 2000);
-        rec.apply("sessions: {}");
-        Await.until(s::isTerminated, 3000);
-        assertTrue(links.get("tool-a").consumerDeleted);
-        rec.apply("sessions: {}");
-        assertFalse(rec.sessions().containsKey("tool-a"));
+
+        rec.apply("sessions: {}");                                     // declaration disappears
+        Await.until(() -> s.snapshot().observedState() == ObservedState.FAILED, 3000);
+        assertTrue(s.snapshot().reason().startsWith("INVALID_SPEC"), s.snapshot().reason());
+        assertFalse(s.isTerminated(), "config disappearance must not terminate the session");
+        assertSame(s, rec.sessions().get("tool-a"), "same instance is retained");
+
+        // re-add with the original durable → same instance recovers
+        rec.apply(yaml("tool-a", "RUNNING", "tool.a.events", "v2"));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE, 3000);
+        assertSame(s, rec.sessions().get("tool-a"));
+    }
+
+    @Test
+    void reAddingChangedDurableFailsClosedWithoutNewConsumer() {
+        rec.apply(yaml("tool-a", "RUNNING", "tool.a.events", "v1"));   // durable dur-tool-a
+        var s = rec.sessions().get("tool-a");
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE, 2000);
+        int connects = links.get("tool-a").connectCalls.get();
+
+        rec.apply(yamlDurable("tool-a", "RUNNING", "tool.a.events", "v2", "dur-tool-a-NEW"));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.FAILED, 3000);
+        assertTrue(s.snapshot().reason().startsWith("INVALID_SPEC"), s.snapshot().reason());
+        assertSame(s, rec.sessions().get("tool-a"), "no replacement instance is created");
+        try { Thread.sleep(300); } catch (InterruptedException e) { throw new RuntimeException(e); }
+        assertEquals(connects, links.get("tool-a").connectCalls.get(),
+                "a durable mutation must not connect / create a second consumer");
     }
 
     @Test
@@ -102,29 +134,6 @@ class ReconcilerTest {
         assertNotNull(s);
         Await.until(() -> s.snapshot().observedState() == ObservedState.FAILED, 2000);
         assertTrue(s.snapshot().reason().startsWith("INVALID_SPEC"));
-    }
-
-    @Test
-    void rapidRemoveAndReaddReplacesTerminatingSession() {
-        var link = new FakeNatsLink();
-        link.messages.addAll(List.of("m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10"));
-        var local = new Reconciler(Path.of("/nonexistent"),
-                name -> new ListenerSession(name, link, 100));
-        String y = yaml("tool-a", "RUNNING", "tool.a.events", "v1");
-
-        local.apply(y);
-        var original = local.sessions().get("tool-a");
-        Await.until(() -> original.snapshot().admittedCount() >= 1, 2000);
-        local.apply("sessions: {}");
-        Await.until(() -> original.snapshot().observedState() == ObservedState.DRAINING, 2000);
-        local.apply(y);
-
-        Await.until(() -> {
-            var replacement = local.sessions().get("tool-a");
-            return replacement != null && replacement != original
-                    && replacement.snapshot().observedState() == ObservedState.ACTIVE;
-        }, 5000);
-        assertTrue(original.isTerminated());
     }
 
     @Test
@@ -164,35 +173,5 @@ class ReconcilerTest {
                 && local.sessions().get("tool-a").snapshot().observedState() == ObservedState.ACTIVE, 2000);
         Await.until(() -> "v2".equals(toolB.snapshot().appliedConfigVersion())
                 && toolB.snapshot().observedState() == ObservedState.ACTIVE, 3000);
-    }
-
-    @Test
-    void replacementFactoryFailureIsRetriedWithoutAnotherReload() {
-        var attempts = new AtomicInteger();
-        var local = new Reconciler(Path.of("/nonexistent"), name -> {
-            int attempt = attempts.incrementAndGet();
-            if (attempt == 2) throw new IllegalStateException("injected replacement failure");
-            var link = new FakeNatsLink();
-            if (attempt == 1) {
-                link.messages.addAll(List.of("m1", "m2", "m3", "m4", "m5",
-                        "m6", "m7", "m8", "m9", "m10"));
-            }
-            return new ListenerSession(name, link, 100);
-        });
-        String y = yaml("tool-a", "RUNNING", "tool.a.events", "v1");
-
-        local.apply(y);
-        var original = local.sessions().get("tool-a");
-        Await.until(() -> original.snapshot().admittedCount() >= 1, 2000);
-        local.apply("sessions: {}");
-        Await.until(() -> original.snapshot().observedState() == ObservedState.DRAINING, 2000);
-        local.apply(y);
-
-        Await.until(() -> {
-            var replacement = local.sessions().get("tool-a");
-            return replacement != null && replacement != original
-                    && replacement.snapshot().observedState() == ObservedState.ACTIVE;
-        }, 5000);
-        assertEquals(3, attempts.get());
     }
 }

@@ -12,5 +12,6 @@ public sealed interface Event {
     record RetryTick() implements Event {}
     record DrainComplete() implements Event {}
     record DrainTimeout() implements Event {}
-    record Terminate() implements Event {}
+    /** 程序生命週期收尾：drain → close NATS → 結束 loop，durable 保留（不刪 consumer）。 */
+    record Shutdown() implements Event {}
 }
