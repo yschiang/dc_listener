@@ -157,6 +157,19 @@ class SingleSessionReconcilerTest {
     }
 
     @Test
+    void reAppliedSelectedEntryWithChangedDurableFailsClosedWithoutSilentPreFilter() {
+        rec.applySnapshot(yaml("tool-a", "RUNNING", "tool.a.events", "v1", "dur-tool-a"));
+        Await.until(() -> session.snapshot().observedState() == ObservedState.ACTIVE, 2000);
+
+        // same selected entry, later durable mutation → the reconciler must NOT silently pre-filter it;
+        // it delivers the SpecChanged and the state machine fails it closed at the ownership boundary.
+        rec.applySnapshot(yaml("tool-a", "RUNNING", "tool.a.events", "v2", "dur-tool-a-NEW"));
+        Await.until(() -> session.snapshot().observedState() == ObservedState.FAILED, 3000);
+        assertTrue(session.snapshot().reason().startsWith("INVALID_SPEC"), session.snapshot().reason());
+        assertSame(session, rec.session(), "no replacement session is created for a durable mutation");
+    }
+
+    @Test
     void deduplicatesRepeatedMissingEntryInvalidState() {
         rec.applySnapshot(yaml("tool-a", "RUNNING", "tool.a.events", "v1", "dur-tool-a"));
         Await.until(() -> session.snapshot().observedState() == ObservedState.ACTIVE, 2000);

@@ -1,7 +1,7 @@
 package dc.listener.status;
 
 import dc.listener.Await;
-import dc.listener.reconcile.Reconciler;
+import dc.listener.reconcile.SingleSessionReconciler;
 import dc.listener.session.FakeNatsLink;
 import dc.listener.session.ListenerSession;
 import dc.listener.session.ObservedState;
@@ -17,6 +17,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,7 +32,7 @@ class StatusServerTest {
 
     @Test
     void getStatusReturnsValidJsonSnapshot() throws Exception {
-        Reconciler rec = activeReconciler();
+        SingleSessionReconciler rec = activeReconciler();
         server = new StatusServer(0, rec);
         server.start();
 
@@ -46,7 +47,7 @@ class StatusServerTest {
         Map<?, ?> sessions = (Map<?, ?>) root.get("sessions");
         Map<?, ?> tool = (Map<?, ?>) sessions.get("tool-a");
         Map<?, ?> conditions = (Map<?, ?>) tool.get("conditions");
-        assertEquals("cell-1", cell.get("cellId"));
+        assertEquals("tool-a", cell.get("cellId"));   // process/runtime identity == SESSION_NAME
         assertNull(cell.get("specError"));
         assertEquals("tool.a.events", tool.get("subject"));
         assertEquals("RUNNING", tool.get("desiredState"));
@@ -55,9 +56,46 @@ class StatusServerTest {
     }
 
     @Test
+    void statusContainsExactlyTheSelectedToolEvenWithSeveralDeclarations() throws Exception {
+        var session = new ListenerSession("tool-a", new FakeNatsLink(), 0);
+        var rec = new SingleSessionReconciler(Path.of("/nonexistent"), session);
+        rec.applySnapshot("""
+            sessions:
+              tool-a:
+                desiredState: RUNNING
+                configVersion: v1
+                config:
+                  subject: tool.a.events
+                  durable: dur-tool-a
+              tool-b:
+                desiredState: RUNNING
+                configVersion: v1
+                config:
+                  subject: tool.b.events
+                  durable: dur-tool-b
+              tool-c:
+                desiredState: RUNNING
+                configVersion: v1
+                config:
+                  subject: tool.c.events
+                  durable: dur-tool-c
+            """);
+        Await.until(() -> session.snapshot().observedState() == ObservedState.ACTIVE, 2000);
+        server = new StatusServer(0, rec);
+        server.start();
+
+        var response = client.send(HttpRequest.newBuilder(uri("/status")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        Map<?, ?> sessions = (Map<?, ?>) json(response.body()).get("sessions");
+        assertEquals(Set.of("tool-a"), sessions.keySet(),
+                "single-session status must expose only the process-selected tool");
+    }
+
+    @Test
     void malformedSpecErrorIsStillValidJson() throws Exception {
-        var rec = new Reconciler(Path.of("/nonexistent"),
-                name -> new ListenerSession(name, new FakeNatsLink(), 0));
+        var rec = new SingleSessionReconciler(Path.of("/nonexistent"),
+                new ListenerSession("tool-a", new FakeNatsLink(), 0));
         rec.applySnapshot("sessions: [broken");
         server = new StatusServer(0, rec);
         server.start();
@@ -85,9 +123,9 @@ class StatusServerTest {
         assertEquals(404, nested.statusCode());
     }
 
-    private Reconciler activeReconciler() {
-        var rec = new Reconciler(Path.of("/nonexistent"),
-                name -> new ListenerSession(name, new FakeNatsLink(), 0));
+    private SingleSessionReconciler activeReconciler() {
+        var session = new ListenerSession("tool-a", new FakeNatsLink(), 0);
+        var rec = new SingleSessionReconciler(Path.of("/nonexistent"), session);
         rec.applySnapshot("""
             sessions:
               tool-a:
@@ -97,7 +135,6 @@ class StatusServerTest {
                   subject: tool.a.events
                   durable: dur-tool-a
             """);
-        var session = rec.sessions().get("tool-a");
         Await.until(() -> session.snapshot().observedState() == ObservedState.ACTIVE, 2000);
         return rec;
     }

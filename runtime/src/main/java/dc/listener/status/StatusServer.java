@@ -2,20 +2,20 @@ package dc.listener.status;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import dc.listener.reconcile.Reconciler;
+import dc.listener.reconcile.SingleSessionReconciler;
+import dc.listener.session.ListenerSession;
 import dc.listener.session.SessionStatus;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.TreeMap;
 
-/** 唯讀觀察介面（spec §6）：只提供精確的 GET /status。 */
+/** 唯讀觀察介面（spec §6）：只提供精確的 GET /status。單一 owner：最多回報那一個被選中的 session。 */
 public final class StatusServer {
     private final HttpServer http;
-    private final Reconciler reconciler;
+    private final SingleSessionReconciler reconciler;
 
-    public StatusServer(int port, Reconciler reconciler) throws IOException {
+    public StatusServer(int port, SingleSessionReconciler reconciler) throws IOException {
         this.reconciler = reconciler;
         this.http = HttpServer.create(new InetSocketAddress(port), 0);
         http.createContext("/status", this::handleStatus);
@@ -23,7 +23,7 @@ public final class StatusServer {
 
     public void start() { http.start(); }
 
-    void stop() { http.stop(0); }
+    public void stop() { http.stop(0); }
 
     int port() { return http.getAddress().getPort(); }
 
@@ -53,16 +53,16 @@ public final class StatusServer {
 
     private String json() {
         var sb = new StringBuilder();
-        sb.append("{\"cell\":{\"cellId\":\"cell-1\",\"specError\":")
+        // cellId 欄位名保留（demo 相容）；值改為 process/runtime 身分（= SESSION_NAME），不再假裝有 cell 聚合。
+        sb.append("{\"cell\":{\"cellId\":")
+          .append(q(reconciler.sessionName()))
+          .append(",\"specError\":")
           .append(q(reconciler.specError()))
           .append("},\"sessions\":{");
-        boolean first = true;
-        for (var en : new TreeMap<>(reconciler.sessions()).entrySet()) {
-            if (en.getValue().isTerminated()) continue;
-            SessionStatus s = en.getValue().snapshot();
-            if (!first) sb.append(',');
-            first = false;
-            sb.append(q(en.getKey())).append(":{")
+        ListenerSession session = reconciler.session();
+        if (!session.isTerminated()) {
+            SessionStatus s = session.snapshot();
+            sb.append(q(reconciler.sessionName())).append(":{")
               .append("\"subject\":").append(q(s.subject())).append(',')
               .append("\"desiredState\":").append(q(s.desiredState() == null ? null : s.desiredState().name())).append(',')
               .append("\"observedState\":").append(q(s.observedState().name())).append(',')
