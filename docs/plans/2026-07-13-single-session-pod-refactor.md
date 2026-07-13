@@ -12,9 +12,9 @@ tool workloads through Docker Compose.
 the existing `sessions.yaml` compatibility schema, owns one state machine/NATS connection, and exposes one
 session in the existing `/status` compatibility envelope. One session actor virtual thread remains as a
 convenient blocking loop, not as an isolation boundary; the mailbox serializes file-poller events with NATS
-processing. Compose models controller-generated workloads as three default services using the same
-image/config file but different identities
-and status ports. Controller, Lease, finalizer, UID-derived durable identity, and production CRD work remain
+processing. Compose represents three controller-rendered default workloads that share one image and config
+file while retaining distinct identities and status ports. Controller, Lease, finalizer, UID-derived durable
+identity, and production CRD work remain
 outside this prototype and are governed by ADR-0001.
 
 **Tech stack:** Java 21, jnats 2.20.2, SnakeYAML 2.2, JUnit 5, POSIX shell, Docker Compose, NATS JetStream.
@@ -28,7 +28,7 @@ outside this prototype and are governed by ADR-0001.
   session.
 - A malformed whole file keeps the last-good session state and reports `specError`.
 - A missing or invalid selected entry fails closed as `INVALID_SPEC`; it must not terminate the process or
-  delete a durable consumer.
+  perform consumer deletion.
 - Config disappearance is not offboarding. Only the future finalizer protocol may authorize consumer
   deletion. The prototype must make no config-only deletion claim.
 - Dynamic changes (`desiredState`, subject/filter, `configVersion`, retry, drain timeout) reconcile without
@@ -134,11 +134,11 @@ no finalizer/UID/operation-ID protocol in this prototype, no code path is author
 
 - [ ] **RED:** Add state-machine tests proving the first valid durable is latched, a later durable mutation
   becomes `FAILED/INVALID_SPEC` without adopting the new durable, and restoring the original durable
-  recovers the same state machine.
+  resumes the same state-machine instance.
 - [ ] **RED:** Add slow-batch session tests for both ACTIVE → explicit `SpecInvalid` → restored ACTIVE and
   ACTIVE → durable-mutating `SpecChanged` → `FAILED/INVALID_SPEC` → original durable restored. They must
   prove old fetched handles are discarded for NATS redelivery, zero stale handles are acked after reconnect,
-  the actor survives, and the same session instance recovers.
+  the actor survives, and recovery reuses the original session instance.
 - [ ] Replace destructive `Event.Terminate` semantics with a non-destructive `Event.Shutdown`: drain,
   close NATS, and end the loop while retaining the durable. Rename the state flag/tests accordingly.
   `desiredState: STOPPED` remains a non-destructive, restartable lifecycle state.
@@ -149,10 +149,23 @@ no finalizer/UID/operation-ID protocol in this prototype, no code path is author
   paths and obsolete replacement tests; `Shutdown` is reserved for process lifecycle. Task 4 deletes the
   remaining compatibility reconciler.
 - [ ] Remove `NatsLink.deleteConsumer`, `JnatsLink.deleteConsumer`, and the fake's deletion flag. Process
-  shutdown and configuration disappearance can close NATS but cannot delete the durable.
+  shutdown and configuration disappearance may close the NATS connection; both retain the existing durable.
 - [ ] Remove the broad `JetStreamApiException` delete-and-recreate fallback from `JnatsLink.connect()`.
-  A rejected consumer update must close the link, fail closed with an appropriate classified error, and
-  leave the existing durable untouched.
+  Apply these exact classifications; do not leave classification to implementation judgment:
+
+  - a selected durable change is a local immutable-field violation: immediately enter
+    `FAILED/INVALID_SPEC`, do not increment retry attempts, and recover only after a declaration restores
+    the latched durable;
+  - any `JetStreamApiException` from in-place consumer/filter update maps to `RESOURCE_NOT_FOUND`, enters
+    `DEGRADED`, retries through the configured bounded `maxAttempts`, and then becomes
+    `FAILED/RETRY_EXHAUSTED` if the server keeps rejecting it;
+  - connection/I/O failure remains `MESSAGING_ENDPOINT_UNREACHABLE` and follows the same bounded
+    `DEGRADED` retry path.
+
+  None of these paths may delete/recreate the consumer or switch durable identity.
+- [ ] **RED:** Add exact transition tests for all three classifications above, including retry counters,
+  terminal reason, correction/recovery behavior, and proof that a permanent server rejection cannot retry
+  beyond `maxAttempts`.
 - [ ] Centralize session event handling so **any** event that transitions the state machine to `FAILED`
   clears in-memory in-flight handles before the link is closed, including internal rejection of a
   durable-mutating `SpecChanged`. Do not ack handles created by a previous connection after recovery.
@@ -172,6 +185,21 @@ no finalizer/UID/operation-ID protocol in this prototype, no code path is author
 - [ ] Run focused state-machine/session tests, the full Java suite, the real NATS safety acceptance, and the
   independent review gate.
 - [ ] Commit: `enforce durable consumer ownership`
+
+---
+
+### Parallel gate after Task 2: controller technical design
+
+After Task 2 is committed and independently approved, the durable ownership, deletion prohibition, and
+static/dynamic field boundary are stable enough to start the production controller **technical design** in
+a separate task/worktree while Tasks 3–6 continue. This parallel task is documentation/fixture work only;
+it must not add controller code, CRDs, Kubernetes manifests, Lease/finalizer implementation, or dependencies
+to this prototype refactor.
+
+Its bounded outputs are a separately reviewed controller design document plus a versioned
+`ToolListener.spec` → per-tool runtime projection schema fixture. Task 7 consumes those outputs when aligning
+normative documents. If the controller design discovers a required change to the Task 2 ownership boundary,
+pause both streams and amend ADR-0001 before implementation; do not silently diverge.
 
 ---
 
@@ -204,7 +232,7 @@ public final class SingleSessionReconciler {
 - [ ] **RED:** Add failure-contract tests:
   malformed YAML preserves last-good ACTIVE state while reporting `specError`; a missing selected entry
   and an invalid selected entry produce `FAILED/INVALID_SPEC`; neither terminates the process nor mutates
-  consumer identity; restoring the selected declaration recovers the same session instance with no stale
+  consumer identity; restoring the selected declaration resumes the same session instance with no stale
   in-flight handles.
 - [ ] Implement one eagerly started `ListenerSession`, last-delivered valid/invalid deduplication, and
   selected-entry projection from `SpecParser.Parsed`.
@@ -336,7 +364,7 @@ runtime implementation or embedding dynamic listener fields in the service defin
 - [ ] Scenario 2: stop NATS for a bounded interval with a trap that always restores it. Poll all endpoints in
   one loop and remember whether each tool was observed DEGRADED so sequential waits cannot miss a transient;
   then verify every tool returns ACTIVE.
-- [ ] Scenario 3: install EXIT/INT/TERM traps that restore `listener-tool-b`; stop only that service; prove
+- [ ] Scenario 3: install EXIT/INT/TERM traps that restore `listener-tool-b`; stop only that workload; prove
   tool-a/tool-c remain ACTIVE, their admitted counts advance, and their container IDs/start times do not
   change; restore tool-b and prove recovery. This validates process/Pod isolation rather than in-JVM
   session isolation.
