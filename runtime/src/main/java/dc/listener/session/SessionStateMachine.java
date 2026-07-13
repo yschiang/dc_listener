@@ -30,12 +30,13 @@ public final class SessionStateMachine {
                 if (state == ObservedState.CONNECTING) {
                     failures = 0;
                     reason = "";
-                    moveTo(ObservedState.ACTIVE);
+                    moveTo(pending != null || terminating
+                            ? ObservedState.DRAINING : ObservedState.ACTIVE);
                 }
             }
             case Event.ConnectFailed f -> onConnectFailed(f.reason());
             case Event.FetchError fe -> {
-                if (state == ObservedState.ACTIVE) {
+                if (state == ObservedState.ACTIVE || state == ObservedState.DRAINING) {
                     failures = 1;
                     reason = fe.reason();
                     moveTo(ObservedState.DEGRADED);

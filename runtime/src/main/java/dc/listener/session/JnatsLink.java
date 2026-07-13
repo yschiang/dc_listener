@@ -62,6 +62,7 @@ public final class JnatsLink implements NatsLink {
 
     @Override
     public List<InFlightMsg> fetch(int max, Duration wait) throws LinkException {
+        if (!isConnected()) throw disconnected();
         try {
             var out = new ArrayList<InFlightMsg>();
             var opts = FetchConsumeOptions.builder()
@@ -74,14 +75,23 @@ public final class JnatsLink implements NatsLink {
                     out.add(new InFlightMsg(new String(m.getData(), StandardCharsets.UTF_8), m));
                 }
             }
+            if (!isConnected()) throw disconnected();
             return out;
+        } catch (LinkException e) {
+            throw e;
         } catch (Exception e) {
             throw new LinkException("MESSAGING_ENDPOINT_UNREACHABLE", e);
         }
     }
 
     @Override
-    public void ack(InFlightMsg m) { ((Message) m.handle()).ack(); }
+    public void ack(InFlightMsg m) throws LinkException {
+        try {
+            ((Message) m.handle()).ack();
+        } catch (RuntimeException e) {
+            throw new LinkException("MESSAGING_ENDPOINT_UNREACHABLE", e);
+        }
+    }
 
     @Override
     public long pending() throws Exception { return consumer.getConsumerInfo().getNumPending(); }
@@ -115,5 +125,9 @@ public final class JnatsLink implements NatsLink {
                 .maxReconnects(0)
                 .connectionTimeout(Duration.ofSeconds(2))
                 .build();
+    }
+
+    private LinkException disconnected() {
+        return new LinkException("MESSAGING_ENDPOINT_UNREACHABLE", null);
     }
 }

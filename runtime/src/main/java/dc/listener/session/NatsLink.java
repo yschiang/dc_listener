@@ -12,7 +12,7 @@ public interface NatsLink {
 
     List<InFlightMsg> fetch(int max, Duration wait) throws LinkException;
 
-    void ack(InFlightMsg m);
+    void ack(InFlightMsg m) throws LinkException;
 
     /** consumer 的 server 端 backlog（numPending）；不可用時丟例外，呼叫端保留舊值。 */
     long pending() throws Exception;

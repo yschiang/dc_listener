@@ -78,7 +78,14 @@ public final class ListenerSession {
                                 continue;
                             }
                         }
-                        if (!inFlight.isEmpty() && gate.admits()) processOne();
+                        if (!inFlight.isEmpty() && gate.admits()) {
+                            try {
+                                processOne();
+                            } catch (LinkException ex) {
+                                inFlight.clear();
+                                machine.onEvent(new Event.FetchError(ex.reasonCode()));
+                            }
+                        }
                     }
                     case DRAINING -> {
                         if (drainDeadline == null) {
@@ -92,7 +99,12 @@ public final class ListenerSession {
                             inFlight.clear();   // 未 ack → 之後 redelivery（at-least-once）
                             machine.onEvent(new Event.DrainTimeout());
                         } else {
-                            processOne();
+                            try {
+                                processOne();
+                            } catch (LinkException ex) {
+                                inFlight.clear();
+                                machine.onEvent(new Event.FetchError(ex.reasonCode()));
+                            }
                         }
                     }
                     case DEGRADED -> {
@@ -107,7 +119,7 @@ public final class ListenerSession {
         }
     }
 
-    private void processOne() {
+    private void processOne() throws LinkException {
         InFlightMsg m = inFlight.removeFirst();
         pipeline.process(m);
         link.ack(m);

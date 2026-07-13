@@ -160,6 +160,23 @@ class SessionStateMachineTest {
         assertEquals(1, m.retryAttempt());
     }
 
+    @Test void drainErrorReconnectsAppliedConfigThenResumesPendingChange() {
+        var m = activeMachine();
+        m.onEvent(new Event.SpecChanged(spec(DesiredState.RUNNING, "v2", "s2", 10)));
+        assertEquals(DRAINING, m.state());
+
+        m.onEvent(new Event.FetchError("MESSAGING_ENDPOINT_UNREACHABLE"));
+        assertEquals(DEGRADED, m.state());
+        m.onEvent(new Event.RetryTick());
+        assertEquals(CONNECTING, m.state());
+        m.onEvent(new Event.ConnectOk());
+        assertEquals(DRAINING, m.state());
+
+        m.onEvent(new Event.DrainComplete());
+        assertEquals(CONNECTING, m.state());
+        assertEquals("v2", m.appliedConfigVersion());
+    }
+
     @Test void terminateFromActiveDrainsThenStops() {
         var m = activeMachine();
         m.onEvent(new Event.Terminate());

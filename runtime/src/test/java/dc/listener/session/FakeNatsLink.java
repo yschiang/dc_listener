@@ -19,6 +19,7 @@ public final class FakeNatsLink implements NatsLink {
     public volatile String failReason = "MESSAGING_ENDPOINT_UNREACHABLE";
     public volatile boolean connected;
     public volatile boolean consumerDeleted;
+    public volatile boolean failAcksWhenDisconnected;
 
     @Override public void connect(SessionSpec spec) throws LinkException {
         connectCalls.incrementAndGet();
@@ -29,7 +30,8 @@ public final class FakeNatsLink implements NatsLink {
         connected = true;
     }
 
-    @Override public List<InFlightMsg> fetch(int max, Duration wait) {
+    @Override public List<InFlightMsg> fetch(int max, Duration wait) throws LinkException {
+        if (!connected) throw new LinkException("MESSAGING_ENDPOINT_UNREACHABLE", null);
         var out = new ArrayList<InFlightMsg>();
         String d;
         while (out.size() < max && (d = messages.poll()) != null) out.add(new InFlightMsg(d, null));
@@ -39,7 +41,12 @@ public final class FakeNatsLink implements NatsLink {
         return out;
     }
 
-    @Override public void ack(InFlightMsg m) { acked.add(m.data()); }
+    @Override public void ack(InFlightMsg m) throws LinkException {
+        if (failAcksWhenDisconnected && !connected) {
+            throw new LinkException("MESSAGING_ENDPOINT_UNREACHABLE", null);
+        }
+        acked.add(m.data());
+    }
     @Override public long pending() { return messages.size(); }
     @Override public boolean isConnected() { return connected; }
     @Override public void deleteConsumer(SessionSpec spec) { consumerDeleted = true; }

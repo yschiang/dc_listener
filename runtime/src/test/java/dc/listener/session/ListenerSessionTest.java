@@ -117,4 +117,40 @@ class ListenerSessionTest {
         assertEquals("RETRY_EXHAUSTED", s.snapshot().reason());
         assertEquals(3, link.connectCalls.get());
     }
+
+    @Test
+    void disconnectedFetchDegradesThenReconnects() {
+        var link = new FakeNatsLink();
+        var s = new ListenerSession("t", link, 0);
+        s.start();
+        s.deliver(new Event.SpecChanged(spec(DesiredState.RUNNING, Duration.ofMillis(200), 10)));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE, 2000);
+
+        link.connected = false;
+
+        Await.until(() -> s.snapshot().observedState() == ObservedState.DEGRADED, 2000);
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE
+                && link.connectCalls.get() >= 2, 3000);
+    }
+
+    @Test
+    void disconnectedAckDoesNotKillSessionThread() {
+        var link = new FakeNatsLink();
+        link.failAcksWhenDisconnected = true;
+        link.messages.add("m1");
+        var s = new ListenerSession("t", link, 500);
+        s.start();
+        s.deliver(new Event.SpecChanged(spec(DesiredState.RUNNING, Duration.ofMillis(200), 10)));
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE, 2000);
+        Await.until(link.messages::isEmpty, 2000);
+
+        link.connected = false;
+
+        Await.until(() -> s.snapshot().observedState() == ObservedState.DEGRADED, 2000);
+        Await.until(() -> s.snapshot().observedState() == ObservedState.ACTIVE
+                && link.connectCalls.get() >= 2, 3000);
+        link.messages.add("m2");
+        Await.until(() -> s.snapshot().admittedCount() >= 2, 2000);
+        assertTrue(link.acked.contains("m2"), "actor thread must continue after reconnect");
+    }
 }
