@@ -28,9 +28,9 @@ DEMO_NATS_STOPPED=1
 # combined poller: one pass over ALL endpoints per second, latching each DEGRADED sighting.
 SEEN_A=0; SEEN_B=0; SEEN_C=0; I=0
 while [ "$I" -lt 30 ]; do
-  case "$(demo_state_of tool-a 2>/dev/null || true)" in DEGRADED) SEEN_A=1 ;; esac
-  case "$(demo_state_of tool-b 2>/dev/null || true)" in DEGRADED) SEEN_B=1 ;; esac
-  case "$(demo_state_of tool-c 2>/dev/null || true)" in DEGRADED) SEEN_C=1 ;; esac
+  case "$(demo_state_of tool-a 2>/dev/null || true)" in DEGRADED) [ "$SEEN_A" = 1 ] || demo_log_state tool-a; SEEN_A=1 ;; esac
+  case "$(demo_state_of tool-b 2>/dev/null || true)" in DEGRADED) [ "$SEEN_B" = 1 ] || demo_log_state tool-b; SEEN_B=1 ;; esac
+  case "$(demo_state_of tool-c 2>/dev/null || true)" in DEGRADED) [ "$SEEN_C" = 1 ] || demo_log_state tool-c; SEEN_C=1 ;; esac
   [ "$SEEN_A" = 1 ] && [ "$SEEN_B" = 1 ] && [ "$SEEN_C" = 1 ] && break
   I=$((I + 1)); sleep 1
 done

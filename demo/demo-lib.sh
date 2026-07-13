@@ -119,10 +119,21 @@ EOF
 
 # --- polling waiters (all route through the per-tool endpoint) ---
 
+demo_log_state() {  # tool -> append one "config -> observed state" line to demo.log
+  DEMO_JSON=$(curl -sf "$(demo_url_of "$1")" 2>/dev/null) || return 0
+  printf '%s' "$DEMO_JSON" | jq -r --arg t "$1" '
+    .sessions[$t] as $s
+    | "\(now | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ")) tool=\($t) desired=\($s.desiredState) configVersion=\($s.appliedConfigVersion) observed=\($s.observedState) reason=\(if ($s.reason // "") == "" then "-" else $s.reason end)"
+  ' >> "${DEMO_LOG:-demo/demo.log}" 2>/dev/null || true
+}
+
 demo_wait_state() {  # tool expected timeout
   DEMO_I=0
   while [ "$DEMO_I" -lt "$3" ]; do
-    [ "$(demo_state_of "$1" 2>/dev/null || true)" = "$2" ] && return 0
+    if [ "$(demo_state_of "$1" 2>/dev/null || true)" = "$2" ]; then
+      demo_log_state "$1"
+      return 0
+    fi
     DEMO_I=$((DEMO_I + 1))
     sleep 1
   done

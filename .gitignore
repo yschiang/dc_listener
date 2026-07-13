@@ -3,3 +3,4 @@
 runtime/.gradle/
 runtime/build/
 runtime/bin/
+demo/demo.log
