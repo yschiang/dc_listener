@@ -16,7 +16,7 @@
   - 原型 plan Task 1–7 全部完成（含獨立 review）
   - **ADR-0001 已採納**（commit `747f9e7`）：one Pod / one process / one ListenerSession
   - Refactor plan 執行中：T1 `7f8503b`（outage error boundary）✅ review 過；T2 `01d1619`（durable 所有權）✅ review 過
-  - T3 `acbbc63`（single session reconciler）已 commit，但 ledger **尚無 T3 entry**（review 記錄未落）；T4–T7 未動
+  - T3 `acbbc63`、T4 `3ce7908`、T5 `7fd2966`+`7d57daf` 完成且 review 過（同日稍晚由並行 session 落地，ledger 已更新）；T6 進行中、T7 待做
   - Plan 的「Parallel gate after Task 2」已開：controller technical design 可與 T3–T6 並行，**限文件/fixture**（design doc + `ToolListener.spec`→projection schema fixture），不得加 controller code、CRD manifest、Lease/finalizer 實作或相依
 
 ## 2. 必讀文件（優先順序）
@@ -39,7 +39,7 @@
 ## 4. 關鍵銜接點（易漏，務必帶進設計）
 
 1. **Runtime 已無任何 consumer 刪除路徑**（refactor T2 移除了 `deleteConsumer` API + delete/recreate fallback，且有 source-level 檢查）。Finalizer 協定要求 runtime 重新獲得一條**被授權的**刪除路徑——這是 controller design 必須定義的新 runtime 契約（termination request 的投遞格式與驗證）
-2. `Event.Shutdown`（非破壞性 drain）已存在，但 production caller（JVM shutdown hook）在 refactor T4 才接上——**已驗證 T4 尚未落地**
+2. `Event.Shutdown`（非破壞性 drain）已存在，production caller（JVM shutdown hook / ShutdownCoordinator）已於 T4 `3ce7908` 接上——**此銜接點已解除**
 3. 現行 `/status` **沒有** observed UID / generation / projection revision 欄位（只有 declared/applied configVersion、state、reason 等）——ADR 要求 runtime 回報這些觀測值，controller design 需定義 /status 契約擴充
 
 ## 5. 開放問題（grilling 重點）
